@@ -23,7 +23,7 @@ Nothing below is committed to the repository. Put it in `.env` (copy `.env.examp
 | What | Variables | Where to get it |
 |---|---|---|
 | Capital.com demo account + API key | `CAPITAL_DEMO_API_KEY`, `CAPITAL_DEMO_IDENTIFIER` (login e-mail), `CAPITAL_DEMO_API_PASSWORD` (the API key's custom password); optional `CAPITAL_DEMO_ACCOUNT_ID` | capital.com → enable 2FA → *Settings → API integrations → Generate API key* |
-| PostgreSQL database | `DATABASE_URL` | any PostgreSQL 14+ (managed, or the bundled `db` service) |
+| PostgreSQL database (Supabase) | `DATABASE_URL` | Supabase → *Connect* → **Session pooler** connection string (see below); any PostgreSQL 14+ also works |
 | OpenRouter | `OPENROUTER_API_KEY` (model defaults to `typesafe/jev-1.13`) | openrouter.ai → Keys |
 | Dashboard password | `DASHBOARD_PASSWORD` | choose one; the API stays locked until set |
 | Telegram alerts (optional) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | @BotFather; steps in `.env.example` |
@@ -52,7 +52,7 @@ and waits up to 15 s for a live quote on the WebSocket stream.
 | Open positions / closes | `GET /positions`, `DELETE /positions/{dealId}` |
 | Close details, audit trail | `GET /history/activity` (source SL / TP / USER …) and `GET /history/transactions` |
 
-Differences from the original OANDA design, and how the bot compensates:
+What the Capital.com API does not provide, and how the bot compensates:
 - **No client order IDs.** Each order row gets our own ID and stores Capital.com's
   `dealReference`. If the order request times out before a reference comes back, the order is
   resolved from open positions and the activity history (matching instrument, direction, size,
@@ -76,6 +76,27 @@ Before letting the engine trade, test these steps once on the demo account:
 5. try *close all trades*
 
 Check that the position size in Capital.com's platform matches the units shown on the dashboard.
+
+## Database: Supabase
+
+The bot uses your Supabase project as a plain PostgreSQL database. Only the connection string
+is needed, not the Supabase API URL or keys. In the Supabase dashboard, click **Connect** and copy
+the **Session pooler** URI into `.env`, replacing `[YOUR-PASSWORD]` with your database password:
+
+```
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+```
+
+- **Session pooler (port 5432) is the recommended choice.** It works for both the migrations and
+  the engine, and it is reachable over IPv4, which most VPSs and Docker networks need.
+- The **direct connection** (`db.<project-ref>.supabase.co:5432`) also works, but only over IPv6
+  unless you have Supabase's IPv4 add-on.
+- The **transaction pooler** (port 6543) works for the engine: the bot detects it and turns off
+  prepared-statement caching. Prisma migrations cannot run through it, so use the session
+  pooler URL when you run `npm run migrate:deploy`.
+- If your password contains special characters (`@`, `:`, `/`, `#`, `?`), URL-encode them
+  (for example `@` becomes `%40`).
+- You don't need the bundled `db` service (`--profile local-db`) when using Supabase.
 
 ## Database: Prisma schema + migrations (you run them)
 

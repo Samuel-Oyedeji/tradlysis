@@ -249,6 +249,10 @@ class Settings(BaseSettings):
     def sqlalchemy_database_url(self) -> str:
         return to_asyncpg_url(self.database_url)
 
+    @property
+    def database_uses_transaction_pooler(self) -> bool:
+        return is_transaction_pooler(self.database_url)
+
     def require_broker_credentials(self) -> None:
         prefix = "CAPITAL_DEMO_" if self.is_demo else "CAPITAL_LIVE_"
         missing = [
@@ -289,6 +293,19 @@ def to_asyncpg_url(url: str) -> str:
             key = "ssl"
         query.append((key, value))
     return urlunsplit((scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def is_transaction_pooler(url: str) -> bool:
+    """Whether ``url`` goes through a transaction-mode pooler (PgBouncer / Supavisor).
+
+    Supabase's transaction pooler listens on port 6543; Prisma-style URLs may also say
+    ``?pgbouncer=true``. Such poolers do not support server-side prepared statement caching.
+    """
+    if not url:
+        return False
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    return parts.port == 6543 or query.get("pgbouncer", "").lower() == "true"
 
 
 @lru_cache(maxsize=1)

@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.config.settings import LIVE_CONFIRM_PHRASE, to_asyncpg_url
+from app.config.settings import LIVE_CONFIRM_PHRASE, is_transaction_pooler, to_asyncpg_url
 from tests.conftest import make_settings
 
 
@@ -50,6 +50,18 @@ def test_asyncpg_url_conversion():
         == "postgresql+asyncpg://u:p@h:5432/db?ssl=require"
     )
     assert to_asyncpg_url("postgres://u:p@h/db") == "postgresql+asyncpg://u:p@h/db"
+
+
+def test_supabase_urls():
+    session_pooler = "postgresql://postgres.abcd:pw@aws-0-eu-west-2.pooler.supabase.com:5432/postgres"
+    tx_pooler = "postgresql://postgres.abcd:pw@aws-0-eu-west-2.pooler.supabase.com:6543/postgres?pgbouncer=true"
+    assert to_asyncpg_url(session_pooler) == session_pooler.replace("postgresql://", "postgresql+asyncpg://")
+    assert to_asyncpg_url(tx_pooler).endswith(":6543/postgres")  # Prisma-only pgbouncer flag dropped
+    assert not is_transaction_pooler(session_pooler)
+    assert is_transaction_pooler(tx_pooler)
+    assert is_transaction_pooler(tx_pooler.split("?")[0])
+    assert is_transaction_pooler("postgresql://u:p@h:5432/db?pgbouncer=true")
+    assert not is_transaction_pooler("")
 
 
 def test_missing_credentials_detected():
