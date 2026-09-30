@@ -10,11 +10,11 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from app.alerts.notifier import Notifier
-from app.broker.oanda import OandaClient, OandaError, OandaTransportError
+from app.broker.capital import CapitalClient, CapitalError, CapitalTransportError
 from app.config.settings import Settings
 from app.db.models import Candle, MarketPrice
 from app.db.session import Database
-from app.market_data.candles import Bar, parse_oanda_candle
+from app.market_data.candles import Bar
 from app.market_data.state import MarketState, PriceTick
 from app.market_data.timeutil import utcnow
 
@@ -23,13 +23,14 @@ log = logging.getLogger(__name__)
 COMPONENT = "market_data"
 # Timeframes kept in the database. D, W and M (month) feed the reference levels.
 SYNC_GRANULARITIES = ("M5", "M15", "H1", "H4", "D", "W", "M")
+MARKET_STATUS_POLL_SECONDS = 60.0
 
 
 class MarketDataService:
     def __init__(
         self,
         settings: Settings,
-        client: OandaClient,
+        client: CapitalClient,
         db: Database,
         notifier: Notifier,
         state: MarketState,
@@ -41,6 +42,7 @@ class MarketDataService:
         self.state = state
         self._last_persisted: PriceTick | None = None
         self._stale_alerted = False
+        self._status_checked_at: datetime | None = None
 
     # ------------------------------------------------------------------ stream
 
@@ -49,16 +51,11 @@ class MarketDataService:
         was_connected_once = False
         while not stop.is_set():
             try:
-                async for msg in self.client.stream_prices([self.settings.instrument]):
+                async for quote in self.client.stream_quotes():
                     now = utcnow()
-                    mtype = msg.get("type")
-                    if mtype == "HEARTBEAT":
-                        self.state.on_heartbeat(now)
-                    elif mtype == "PRICE":
-                        self.state.on_tick(PriceTick.from_stream(msg), now)
-                        self.state.on_heartbeat(now)
-                    else:
-                        continue
+                    if quote is not None:
+                        self.state.on_tick(PriceTick.from_quote(quote, self.state.broker_tradeable), now)
+                    self.state.on_heartbeat(now)
                     if not self.state.stream_connected:
                         self.state.stream_connected = True
                         self.state.stream_connected_since = now
@@ -73,13 +70,13 @@ class MarketDataService:
                         break
                 # Server closed the stream cleanly; treat as a disconnect.
                 if not stop.is_set():
-                    raise OandaTransportError("price stream closed by server")
+                    raise CapitalTransportError("price stream closed by server")
             except asyncio.CancelledError:
                 raise
-            except (OandaTransportError, OandaError, ValueError, KeyError) as exc:
+            except (CapitalTransportError, CapitalError, ValueError, KeyError) as exc:
                 self.state.stream_connected = False
                 self.state.reconnects += 1
-                level_fn = self.notifier.error if isinstance(exc, OandaError) else self.notifier.warning
+                level_fn = self.notifier.error if isinstance(exc, CapitalError) else self.notifier.warning
                 await level_fn(
                     COMPONENT,
                     "STREAM_DISCONNECTED",
@@ -121,14 +118,30 @@ class MarketDataService:
             except Exception:
                 log.exception("Failed to persist price")
 
+    async def refresh_market_status(self) -> None:
+        """Poll the broker's market status (TRADEABLE, CLOSED, ...); fails closed on errors."""
+        try:
+            status = await self.client.get_market_status()
+        except Exception as exc:
+            log.warning("market status fetch failed: %s", exc)
+            status = "UNKNOWN"
+        self.state.broker_market_status = status
+        self.state.broker_tradeable = status == "TRADEABLE"
+        self._status_checked_at = utcnow()
+
     async def run_health_monitor(self, stop: asyncio.Event) -> None:
-        """Alert on stale prices during market hours."""
+        """Alert on stale prices during market hours and keep the broker market status fresh."""
         while not stop.is_set():
             try:
                 await asyncio.wait_for(stop.wait(), timeout=5.0)
             except TimeoutError:
                 pass
             now = utcnow()
+            if (
+                self._status_checked_at is None
+                or (now - self._status_checked_at).total_seconds() >= MARKET_STATUS_POLL_SECONDS
+            ):
+                await self.refresh_market_status()
             if not self.state.market_open(now):
                 self._stale_alerted = False
                 continue
@@ -149,8 +162,7 @@ class MarketDataService:
     # ------------------------------------------------------------------ candles
 
     async def sync_candles(self, granularity: str, count: int) -> int:
-        raw = await self.client.get_candles(self.settings.instrument, granularity, count=count)
-        bars = [parse_oanda_candle(c) for c in raw]
+        bars = await self.client.get_candles(granularity, count=count)
         await self.upsert_bars(granularity, bars)
         return len(bars)
 
@@ -170,7 +182,7 @@ class MarketDataService:
                 "ask_close": b.ask_close,
                 "volume": b.volume,
                 "complete": b.complete,
-                "source": "oanda",
+                "source": "capital",
             }
             for b in bars
         ]

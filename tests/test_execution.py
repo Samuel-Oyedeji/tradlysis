@@ -1,4 +1,4 @@
-"""Executor + reconciliation against the fake broker and a real (test) PostgreSQL database."""
+"""Executor + reconciliation against the fake Capital.com broker and a real (test) PostgreSQL database."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.alerts.notifier import Notifier
-from app.broker.oanda import InstrumentInfo, OandaClient
+from app.broker.types import InstrumentInfo
 from app.db.control import get_control, set_control
 from app.db.enums import ControlKey
 from app.db.models import BrokerTransaction, Decision, DecisionRequest, Order, RiskCheck, SystemEvent, Trade
@@ -17,15 +17,16 @@ from app.execution.executor import OrderExecutor
 from app.reconciliation.reconciler import Reconciler, r_multiple
 from app.risk.engine import CheckResult, RiskResult
 from tests.conftest import make_settings
-from tests.fake_broker import ACCOUNT_ID, FakeBroker
+from tests.fake_broker import FakeBroker, make_client
 from tests.helpers import T0
 
-INST = InstrumentInfo("EUR_USD", -4, 5, 0, 1.0, 0.0333)
+INST = InstrumentInfo("EUR_USD", -4, 5, 0, 100.0, 0.0333, "EURUSD")
 
 
 @pytest.fixture(autouse=True)
 def fast_lookup(monkeypatch):
     monkeypatch.setattr("app.execution.executor.LOOKUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr("app.execution.executor.CONFIRM_DELAY_SECONDS", 0)
 
 
 @pytest.fixture
@@ -36,8 +37,7 @@ def broker():
 @pytest.fixture
 def parts(db, broker):
     settings = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
-    client = OandaClient("https://api.test", "https://stream.test", "tok", ACCOUNT_ID,
-                         transport=broker.transport(), max_get_retries=0)
+    client = make_client(broker)
     notifier = Notifier(db, None)
     executor = OrderExecutor(settings, client, db, notifier, INST)
     reconciler = Reconciler(settings, client, db, notifier, executor)
@@ -82,20 +82,38 @@ async def trades(db) -> list[Trade]:
         return list((await s.scalars(select(Trade).order_by(Trade.id))).all())
 
 
+async def events(db, event_type) -> list[SystemEvent]:
+    async with db.session() as s:
+        return list((await s.scalars(select(SystemEvent).where(SystemEvent.event_type == event_type))).all())
+
+
 async def test_fill_records_order_and_trade(db, broker, parts):
     _, executor, _ = parts
     req_id, rc_id = await chain(db)
     order = await executor.execute_trade(rc_id, req_id, approved())
-    assert order.status == "FILLED"
+    assert order.status == "FILLED", order.reject_reason
     assert order.fill_price == pytest.approx(1.1026)
     posted = broker.order_posts[0]
-    assert posted["positionFill"] == "OPEN_ONLY" and posted["timeInForce"] == "FOK"
-    assert posted["stopLossOnFill"]["price"] == "1.10060" and posted["takeProfitOnFill"]["price"] == "1.10760"
-    assert posted["priceBound"] == "1.10270"  # entry + 1 pip max slippage
-    assert posted["clientExtensions"]["id"] == order.client_order_id
+    assert posted == {"epic": "EURUSD", "direction": "BUY", "size": 10000, "guaranteedStop": False,
+                      "trailingStop": False, "stopLevel": 1.1006, "profitLevel": 1.1076}
+    assert order.price_bound == pytest.approx(1.1027)  # entry + 1 pip max slippage
+    assert order.broker_order_id.startswith("o_")
+    [deal_id] = broker.positions
+    assert order.broker_trade_id == deal_id
     [t] = await trades(db)
     assert t.state == "OPEN" and t.order_id == order.id and not t.unexpected
+    assert t.broker_trade_id == deal_id and t.initial_units == 10000
     assert t.initial_risk_price == pytest.approx(0.0020)
+
+
+async def test_sell_fill(db, broker, parts):
+    _, executor, _ = parts
+    req_id, rc_id = await chain(db)
+    order = await executor.execute_trade(rc_id, req_id, approved("SELL"))
+    assert order.status == "FILLED" and order.filled_units == -10000
+    assert broker.order_posts[0]["direction"] == "SELL" and broker.order_posts[0]["size"] == 10000
+    [t] = await trades(db)
+    assert t.direction == "SELL" and t.initial_units == -10000
 
 
 async def test_one_order_per_risk_check(db, broker, parts):
@@ -107,6 +125,15 @@ async def test_one_order_per_risk_check(db, broker, parts):
     assert len(broker.order_posts) == 1
 
 
+async def test_open_only_guard_blocks_second_position(db, broker, parts):
+    _, executor, _ = parts
+    broker.add_external_position(units=-5000, price=1.1030, sl=1.1060)
+    req_id, rc_id = await chain(db)
+    o = await executor.execute_trade(rc_id, req_id, approved())
+    assert o.status == "FAILED" and o.reject_reason.startswith("OPEN_ONLY")
+    assert not broker.order_posts, "an opposite order could net against the open position"
+
+
 async def test_timeout_after_fill_is_resolved_not_resubmitted(db, broker, parts):
     _, executor, _ = parts
     broker.order_mode = "timeout_after"
@@ -114,40 +141,89 @@ async def test_timeout_after_fill_is_resolved_not_resubmitted(db, broker, parts)
     order = await executor.execute_trade(rc_id, req_id, approved())
     assert order.status == "FILLED"
     assert len(broker.order_posts) == 1, "must not resubmit an order the broker already filled"
-    assert len(broker.open_trades) == 1
-    assert len(await trades(db)) == 1
+    assert len(broker.positions) == 1
+    [t] = await trades(db)
+    assert t.order_id == order.id and not t.unexpected
 
 
-async def test_timeout_before_receipt_is_resubmitted_with_same_client_id(db, broker, parts):
+async def test_timeout_without_fill_fails_and_is_never_resubmitted(db, broker, parts):
     _, executor, _ = parts
     broker.order_mode = "timeout_before"
     req_id, rc_id = await chain(db)
     order = await executor.execute_trade(rc_id, req_id, approved())
-    assert order.status == "FILLED" and order.attempts == 2
-    assert [p["clientExtensions"]["id"] for p in broker.order_posts] == [order.client_order_id] * 2
-    assert len(broker.open_trades) == 1
+    assert order.status == "FAILED" and order.attempts == 1
+    assert "not resubmitted" in order.reject_reason
+    assert len(broker.order_posts) == 1 and not broker.positions
 
 
-async def test_reject_and_cancel(db, broker, parts):
+async def test_failed_unknown_order_is_adopted_if_the_position_appears_later(db, broker, parts):
+    _, executor, reconciler = parts
+    broker.order_mode = "timeout_before"
+    req_id, rc_id = await chain(db)
+    order = await executor.execute_trade(rc_id, req_id, approved())
+    assert order.status == "FAILED"
+    # The broker executed it after all (its history lagged): reconciliation links it instead of alerting.
+    broker._fill(broker.order_posts[0])
+    assert await reconciler.reconcile_once()
+    [o] = await orders(db)
+    assert o.status == "FILLED" and o.broker_trade_id in broker.positions
+    [t] = await trades(db)
+    assert t.order_id == o.id and not t.unexpected
+    assert not await events(db, "UNEXPECTED_POSITION")
+
+
+async def test_rejections(db, broker, parts):
     _, executor, _ = parts
     broker.order_mode = "reject"
     req_id, rc_id = await chain(db, 0)
     o = await executor.execute_trade(rc_id, req_id, approved())
-    assert o.status == "REJECTED" and o.reject_reason == "INSUFFICIENT_MARGIN"
-    broker.order_mode = "cancel"
+    assert o.status == "REJECTED" and o.reject_reason.startswith("error.invalid.size")
+    broker.order_mode = "reject_confirm"
     req_id, rc_id = await chain(db, 1)
     o = await executor.execute_trade(rc_id, req_id, approved())
-    assert o.status == "CANCELLED" and o.reject_reason == "BOUNDS_VIOLATION"
-    assert not broker.open_trades and not await trades(db)
+    assert o.status == "REJECTED" and o.reject_reason == "INSUFFICIENT_FUNDS"
+    assert not broker.positions and not await trades(db)
 
 
-async def test_http_500_then_not_found_is_retried_once_then_fails(db, broker, parts):
+async def test_http_500_without_trace_fails_without_retry(db, broker, parts):
     _, executor, _ = parts
     broker.order_mode = "http500"
     req_id, rc_id = await chain(db)
     o = await executor.execute_trade(rc_id, req_id, approved())
-    # 500 -> lookup says it doesn't exist -> resubmit -> 500 again -> give up
-    assert o.status == "FAILED" and o.attempts == 2
+    assert o.status == "FAILED" and o.attempts == 1 and len(broker.order_posts) == 1
+
+
+async def test_unconfirmed_order_resolved_later_by_deal_reference(db, broker, parts):
+    _, executor, _ = parts
+    broker.order_mode = "no_confirm"
+    req_id, rc_id = await chain(db)
+    o = await executor.execute_trade(rc_id, req_id, approved())
+    assert o.status == "SUBMITTED" and o.broker_order_id
+    broker.release_confirms()
+    await executor.resolve_unresolved_orders()
+    [o] = await orders(db)
+    assert o.status == "FILLED" and o.broker_trade_id in broker.positions
+    assert len(await trades(db)) == 1
+
+
+async def test_slippage_beyond_bound_is_closed(db, broker, parts):
+    _, executor, _ = parts
+    broker.fill_offset = 0.0003  # 3 pips worse than requested; bound is 1 pip
+    req_id, rc_id = await chain(db)
+    o = await executor.execute_trade(rc_id, req_id, approved())
+    assert o.status == "FILLED" and o.fill_price == pytest.approx(1.1029)
+    assert not broker.positions, "position must be closed when the fill breaks the slippage bound"
+    [entry, close] = await orders(db)
+    assert close.purpose == "CLOSE" and close.status == "FILLED"
+    assert len(await events(db, "SLIPPAGE_EXCEEDED")) == 1
+
+
+async def test_slippage_within_bound_is_kept(db, broker, parts):
+    _, executor, _ = parts
+    broker.fill_offset = 0.00005  # half a pip
+    req_id, rc_id = await chain(db)
+    o = await executor.execute_trade(rc_id, req_id, approved())
+    assert o.status == "FILLED" and len(broker.positions) == 1
 
 
 async def test_kill_switch_rechecked_before_submission(db, broker, parts):
@@ -162,36 +238,69 @@ async def test_kill_switch_rechecked_before_submission(db, broker, parts):
 
 async def test_reconciler_tracks_close_and_r(db, broker, parts):
     _, executor, reconciler = parts
-    assert await reconciler.reconcile_once()  # first run: sets transaction cursor, snapshots
+    assert await reconciler.reconcile_once()  # first run: sets history cursor, snapshots
     req_id, rc_id = await chain(db)
     o = await executor.execute_trade(rc_id, req_id, approved())
-    [bt_id] = broker.open_trades
-    broker.close_trade_at(bt_id, 1.1006, reason="STOP_LOSS_ORDER")
+    [deal_id] = broker.positions
+    broker.close_position_at(deal_id, 1.1006, source="SL")
     assert await reconciler.reconcile_once()
     [t] = await trades(db)
     assert t.state == "CLOSED" and t.close_reason == "STOP_LOSS"
+    assert t.close_price == pytest.approx(1.1006)
     assert t.r_multiple == pytest.approx(-1.0)
     assert t.realized_pl == Decimal("-20.000000")
     async with db.session() as s:
-        n = await s.scalar(select(func.count()).select_from(BrokerTransaction))
-    assert n >= 1
+        txs = (await s.scalars(select(BrokerTransaction).order_by(BrokerTransaction.time))).all()
+    assert {tx.type for tx in txs} >= {"POSITION_OPENED", "POSITION_CLOSED", "TRADE"}
+    assert any(tx.trade_id == deal_id and tx.reason == "SL" for tx in txs)
     assert o.status == "FILLED"
+    # A second pass re-reads the overlap window without duplicating the audit trail.
+    assert await reconciler.reconcile_once()
+    async with db.session() as s:
+        assert await s.scalar(select(func.count()).select_from(BrokerTransaction)) == len(txs)
+
+
+async def test_take_profit_close(db, broker, parts):
+    _, executor, reconciler = parts
+    req_id, rc_id = await chain(db)
+    await executor.execute_trade(rc_id, req_id, approved())
+    [deal_id] = broker.positions
+    broker.close_position_at(deal_id, 1.1076, source="TP")
+    assert await reconciler.reconcile_once()
+    [t] = await trades(db)
+    assert t.close_reason == "TAKE_PROFIT" and t.r_multiple == pytest.approx(2.5)
+    assert t.realized_pl == Decimal("50.000000")
+
+
+async def test_close_without_history_waits_then_closes(db, broker, parts, monkeypatch):
+    _, executor, reconciler = parts
+    req_id, rc_id = await chain(db)
+    await executor.execute_trade(rc_id, req_id, approved())
+    [deal_id] = broker.positions
+    broker.positions.pop(deal_id)  # gone, but no close activity
+    assert await reconciler.reconcile_once()
+    [t] = await trades(db)
+    assert t.state == "OPEN", "activity history may lag; wait before closing blind"
+    monkeypatch.setattr("app.reconciliation.reconciler.CLOSE_DETAILS_GRACE_SECONDS", 0)
+    assert await reconciler.reconcile_once()
+    [t] = await trades(db)
+    assert t.state == "CLOSED" and t.close_reason == "CLOSED_UNKNOWN" and t.close_price is None
 
 
 async def test_unexpected_position_flagged(db, broker, parts):
     _, _, reconciler = parts
-    broker.add_external_trade(units=5000, price=1.1)
+    broker.add_external_position(units=5000, price=1.1)
     await reconciler.reconcile_once()
     [t] = await trades(db)
-    assert t.unexpected and t.order_id is None
-    async with db.session() as s:
-        ev = await s.scalar(select(SystemEvent).where(SystemEvent.event_type == "UNEXPECTED_POSITION"))
-    assert ev is not None and ev.level == "CRITICAL"
+    assert t.unexpected and t.order_id is None and t.initial_units == 5000
+    [ev] = await events(db, "UNEXPECTED_POSITION")
+    assert ev.level == "CRITICAL"
 
 
-async def test_breakers_and_day_start(db, broker, parts):
+async def test_account_view_and_breakers(db, broker, parts):
     settings, _, reconciler = parts
     await reconciler.reconcile_once()
+    assert reconciler.account.nav == Decimal("100000.0") and reconciler.account.currency == "USD"
     async with db.session() as s:
         assert (await get_control(s, ControlKey.PEAK_NAV))["value"] == str(reconciler.account.nav)
         assert (await get_control(s, ControlKey.DAY_START_NAV))["value"] == str(reconciler.account.nav)
@@ -206,13 +315,23 @@ async def test_breakers_and_day_start(db, broker, parts):
         assert (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"] is True
 
 
+async def test_session_expiry_relogs_in(db, broker, parts):
+    _, _, reconciler = parts
+    assert await reconciler.reconcile_once()
+    assert broker.logins == 1
+    broker.expire_session()
+    assert await reconciler.reconcile_once()
+    assert broker.logins == 2
+
+
 async def test_flatten_all(db, broker, parts):
     _, executor, _ = parts
-    broker.add_external_trade(units=1000, price=1.1, sl=1.09)
+    broker.add_external_position(units=1000, price=1.1, sl=1.09)
     closed = await executor.flatten_all("test")
-    assert closed == 1 and not broker.open_trades
+    assert closed == 1 and not broker.positions
     [o] = await orders(db)
-    assert o.purpose == "CLOSE" and o.status == "FILLED"
+    assert o.purpose == "CLOSE" and o.status == "FILLED" and o.units == -1000
+    assert o.fill_price == pytest.approx(broker.bid)
 
 
 def test_r_multiple():

@@ -4,13 +4,15 @@ An AI-assisted, systematic FX trading bot, implementing the *AI-Assisted Systema
 Trading Bot: Technical Architecture & V1 Product Specification*.
 
 V1 is an **experiment, not a claim of profitability**. It trades **EUR/USD** with one setup
-(**trend pullback**) on an **OANDA Practice (demo) account**. It combines deterministic
+(**trend pullback**) on a **Capital.com demo account**. It combines deterministic
 technical analysis with structured news context and uses an LLM (`typesafe/jev-1.13` via
 OpenRouter) only to confirm setups. A deterministic risk engine has the final say. Every
 decision opportunity is recorded, including WAITs and rejections.
 
-> Retail FX trading carries substantial risk. Demo results are not proof of future
-> profitability, and live execution differs from demo execution.
+> Capital.com is a CFD broker, so this is a **CFD/FX trading experiment**: positions are
+> leveraged EUR/USD contracts for difference, not spot interbank EUR/USD. CFDs are complex,
+> leveraged products and most retail CFD accounts lose money. Demo results are not proof of
+> future profitability, and demo execution and liquidity differ from live conditions.
 
 ---
 
@@ -20,8 +22,8 @@ Nothing below is committed to the repository. Put it in `.env` (copy `.env.examp
 
 | What | Variables | Where to get it |
 |---|---|---|
-| OANDA practice account | `OANDA_PRACTICE_API_TOKEN`, `OANDA_PRACTICE_ACCOUNT_ID` | oanda.com → practice account → *Manage API Access* |
-| PostgreSQL database | `DATABASE_URL` | any PostgreSQL 14+ (managed, or the bundled `db` service) |
+| Capital.com demo account + API key | `CAPITAL_DEMO_API_KEY`, `CAPITAL_DEMO_IDENTIFIER` (login e-mail), `CAPITAL_DEMO_API_PASSWORD` (the API key's custom password); optional `CAPITAL_DEMO_ACCOUNT_ID` | capital.com → enable 2FA → *Settings → API integrations → Generate API key* |
+| PostgreSQL database (Supabase) | `DATABASE_URL` | Supabase → *Connect* → **Session pooler** connection string (see below); any PostgreSQL 14+ also works |
 | OpenRouter | `OPENROUTER_API_KEY` (model defaults to `typesafe/jev-1.13`) | openrouter.ai → Keys |
 | Dashboard password | `DASHBOARD_PASSWORD` | choose one; the API stays locked until set |
 | Telegram alerts (optional) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | @BotFather; steps in `.env.example` |
@@ -32,6 +34,69 @@ Then check everything with the setup checker, which never trades:
 python -m app.doctor              # or: docker compose run --rm engine python -m app.doctor
 python -m app.doctor --telegram   # also sends a Telegram test message
 ```
+
+The Capital.com check logs in on the demo host, then reads the account, the EURUSD market
+(pip size, minimum size, margin, status), your hedging-mode preference and three M15 candles,
+and waits up to 15 s for a live quote on the WebSocket stream.
+
+## Broker: Capital.com
+
+| What the bot needs | Capital.com API |
+|---|---|
+| Session | `POST /session` (API key + login + API-key password) → `CST` / `X-SECURITY-TOKEN`, renewed automatically on expiry (10 min idle) |
+| Account balances | `GET /accounts` (equity = `balance`, cash = `deposit`, open P/L = `profitLoss`, `available`) |
+| Instrument rules | `GET /markets/EURUSD` (decimals, minimum deal size, margin factor, market status) |
+| Candles | `GET /prices/EURUSD` (M5 … W; monthly bars are built from daily bars) |
+| Live prices | WebSocket `marketData.subscribe` on the streaming host from the login response, pinged every minute |
+| Orders | `POST /positions` (market, with `stopLevel` / `profitLevel`), then `GET /confirms/{dealReference}` |
+| Open positions / closes | `GET /positions`, `DELETE /positions/{dealId}` |
+| Close details, audit trail | `GET /history/activity` (source SL / TP / USER …) and `GET /history/transactions` |
+
+What the Capital.com API does not provide, and how the bot compensates:
+- **No client order IDs.** Each order row gets our own ID and stores Capital.com's
+  `dealReference`. If the order request times out before a reference comes back, the order is
+  resolved from open positions and the activity history (matching instrument, direction, size,
+  stop, target and time), and it is **never resubmitted**. A position that shows up later is
+  linked to that order instead of being treated as unexpected.
+- **No price bound on market orders.** A fill worse than `MAX_SLIPPAGE_PIPS` from the price the
+  risk engine approved is closed straight away and alerted (`SLIPPAGE_EXCEEDED`).
+- **No "open only" flag.** Right before sending an entry, the executor re-reads open positions
+  and refuses if one exists on EUR/USD, so an order can never net against an open position.
+- **P/L of closed trades** is computed from the open and close prices (exact for a USD account
+  on EUR/USD). The broker's own cash movements, including overnight funding, are stored in
+  `broker_transactions`.
+- Sizing assumes one unit of deal size is one euro. The engine refuses to start if Capital.com
+  reports a lot size other than 1.
+
+Before letting the engine trade, test these steps once on the demo account:
+1. log in
+2. read the market
+3. receive streamed prices (`python -m app.doctor` covers 1–3)
+4. watch the first order fill in the dashboard with its stop-loss and take-profit attached
+5. try *close all trades*
+
+Check that the position size in Capital.com's platform matches the units shown on the dashboard.
+
+## Database: Supabase
+
+The bot uses your Supabase project as a plain PostgreSQL database. Only the connection string
+is needed, not the Supabase API URL or keys. In the Supabase dashboard, click **Connect** and copy
+the **Session pooler** URI into `.env`, replacing `[YOUR-PASSWORD]` with your database password:
+
+```
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+```
+
+- **Session pooler (port 5432) is the recommended choice.** It works for both the migrations and
+  the engine, and it is reachable over IPv4, which most VPSs and Docker networks need.
+- The **direct connection** (`db.<project-ref>.supabase.co:5432`) also works, but only over IPv6
+  unless you have Supabase's IPv4 add-on.
+- The **transaction pooler** (port 6543) works for the engine: the bot detects it and turns off
+  prepared-statement caching. Prisma migrations cannot run through it, so use the session
+  pooler URL when you run `npm run migrate:deploy`.
+- If your password contains special characters (`@`, `:`, `/`, `#`, `?`), URL-encode them
+  (for example `@` becomes `%40`).
+- You don't need the bundled `db` service (`--profile local-db`) when using Supabase.
 
 ## Database: Prisma schema + migrations (you run them)
 
@@ -137,7 +202,8 @@ place orders.
 
 ## How a decision is made (every completed 15-minute candle)
 
-1. Sync broker candles (M15, H1, H4, D, W, month). The broker's candles are authoritative.
+1. Sync broker candles (M15, H1, H4, D, W, month). The broker's candles are authoritative
+   (mid prices from Capital.com's bid/ask candles; a candle counts once its period has ended).
 2. **Technicals** (deterministic): EMA 20/50/200, RSI 14, ATR 14, swing structure
    (HH/HL/LH/LL), trend per timeframe, volatility regime and support/resistance:
    clustered H1/H4 swings, previous day/week/month high and low, and round-number
@@ -184,18 +250,21 @@ place orders.
 
    It sizes the position itself: 0.25% of equity by default, converted to the account
    currency.
-8. **Executor** (the only order submitter): writes the order row first, then sends a
-   `MARKET` / `FOK` / `OPEN_ONLY` order with stop-loss, take-profit, a slippage `priceBound`
-   and a unique client ID. A timeout is never treated as filled or as not filled: the order
-   is looked up by client ID, and resubmitted only if the broker confirms it doesn't exist.
-9. **Reconciliation** (every 15 s): account summary, open trades, trade closes with R,
-   broker transaction IDs, stuck orders, unexpected positions (critical alert), peak and
-   start-of-day NAV, and the circuit breakers.
+8. **Executor** (the only order submitter): writes the order row first, and re-checks the
+   kill switch and that no position is open on the instrument. It then sends a market order
+   with stop-loss and take-profit levels and confirms it by its deal reference. A fill beyond
+   the slippage bound is closed at once. A timeout is never treated as filled or as not
+   filled: the order is resolved from broker state and never resubmitted (see *Broker:
+   Capital.com*).
+9. **Reconciliation** (every 15 s): account balances, open positions, trade closes with R
+   (from the activity history), the broker activity/transaction audit trail, stuck orders,
+   unexpected positions (critical alert), peak and start-of-day NAV, and the circuit breakers.
 
 ## Safety controls
 
-- Demo by default. Live mode requires `TRADING_MODE=live`, the exact
-  `LIVE_TRADING_CONFIRM` phrase and separate `OANDA_LIVE_*` credentials.
+- Demo by default: demo mode always uses Capital.com's demo API host. Live mode requires
+  `TRADING_MODE=live`, the exact `LIVE_TRADING_CONFIRM` phrase and separate `CAPITAL_LIVE_*`
+  credentials.
 - Risk settings have hard ceilings: at most 1% per trade, 2% total risk, 5% daily loss
   and 20% drawdown.
 - Global kill switch (dashboard), and daily-loss (auto-resets next trading day at 17:00 New
@@ -203,7 +272,8 @@ place orders.
 - Duplicate protection:
   - one decision per candle
   - one order per approved risk check
-  - idempotent client order IDs
+  - never resubmitting an entry whose outcome was unknown
+  - refusing an entry while a position is open on the instrument
   - no new orders while any order is unresolved
 - Telegram alerts for:
   - stream disconnects and stale prices
@@ -232,8 +302,8 @@ TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/tradlysis_test pytest -q
 ```
 
 The integration tests rebuild the test database from the Prisma migration SQL. They run
-the executor, reconciliation, full decision cycles and the API against a fake OANDA broker
-and a fake LLM. CI (`.github/workflows/ci.yml`) runs everything against PostgreSQL 16 and
+the executor, reconciliation, full decision cycles and the API against a fake Capital.com
+broker and a fake LLM. CI (`.github/workflows/ci.yml`) runs everything against PostgreSQL 16 and
 also fails if `schema.prisma` has changes without a migration.
 
 ## Project layout
@@ -241,7 +311,7 @@ also fails if `schema.prisma` has changes without a migration.
 ```
 app/
   config/          settings (env vars, safety validation)
-  broker/          OANDA v20 REST + streaming client
+  broker/          Capital.com REST + WebSocket client, broker-neutral types
   market_data/     price stream, market state, candles, market hours
   technicals/      indicators, structure, levels, regimes, technical state
   news/            calendar/RSS providers, LLM interpretation, news state

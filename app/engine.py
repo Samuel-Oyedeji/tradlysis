@@ -24,7 +24,8 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.alerts.notifier import Notifier
 from app.alerts.telegram import TelegramSender
-from app.broker.oanda import InstrumentInfo, OandaClient
+from app.broker.capital import CapitalClient
+from app.broker.types import InstrumentInfo
 from app.config.settings import LlmCallPolicy, Settings, get_settings
 from app.db.control import get_all_controls, set_control
 from app.db.enums import OPEN_ORDER_STATUSES, ControlKey, OrderPurpose, OrderStatus, TradeState
@@ -75,7 +76,7 @@ class TradingEngine:
         settings: Settings,
         *,
         db: Database | None = None,
-        client: OandaClient | None = None,
+        client: CapitalClient | None = None,
         llm: OpenRouterClient | None = None,
         calendar: CalendarProvider | None = None,
         feeds: list[ArticleProvider] | None = None,
@@ -89,12 +90,16 @@ class TradingEngine:
         self.telegram = telegram or TelegramSender(settings.telegram_bot_token, settings.telegram_chat_id)
         label = f"[{settings.trading_mode.value.upper()}]"
         self.notifier = Notifier(self.db, self.telegram, settings.alert_dedup_seconds, label=label)
-        self.client = client or OandaClient(
-            settings.oanda_rest_url,
-            settings.oanda_stream_url,
-            settings.oanda_api_token,
-            settings.oanda_account_id,
-            timeout=settings.oanda_request_timeout_seconds,
+        self.client = client or CapitalClient(
+            settings.capital_base_url,
+            settings.capital_api_key,
+            settings.capital_identifier,
+            settings.capital_api_password,
+            account_id=settings.capital_account_id,
+            instrument=settings.instrument,
+            epic=settings.broker_epic,
+            stream_url=settings.capital_stream_url,
+            timeout=settings.capital_request_timeout_seconds,
         )
         self.llm = llm or OpenRouterClient(
             settings.openrouter_api_key,
@@ -129,20 +134,19 @@ class TradingEngine:
     async def setup(self) -> dict[str, Any]:
         """Connect to the broker and build the broker-dependent components."""
         s = self.settings
-        summary = await self.client.get_account_summary()
-        acct_id = s.oanda_account_id
-        if s.is_demo and not acct_id.startswith("101-"):
-            await self.notifier.warning(
-                COMPONENT,
-                "ACCOUNT_ID_UNUSUAL",
-                f"Demo mode but account id {acct_id} does not look like a practice account (101-...)",
+        account = await self.client.get_account()
+        self.instrument = await self.client.get_instrument()
+        if self.instrument.lot_size != 1:
+            # Sizing assumes one unit of deal size is one unit of the base currency.
+            raise RuntimeError(
+                f"{s.broker_epic} has lot size {self.instrument.lot_size}; position sizing assumes 1. Refusing to start."
             )
-        self.instrument = await self.client.get_instrument(s.instrument)
         self.state = MarketState(s.instrument, self.instrument.pip_size)
         self.market = MarketDataService(s, self.client, self.db, self.notifier, self.state)
+        await self.market.refresh_market_status()
         self.executor = OrderExecutor(s, self.client, self.db, self.notifier, self.instrument)
         self.reconciler = Reconciler(s, self.client, self.db, self.notifier, self.executor)
-        return summary
+        return {"account_id": account.account_id, "currency": account.currency, "nav": str(account.nav)}
 
     async def start(self) -> None:
         s = self.settings
@@ -154,8 +158,9 @@ class TradingEngine:
         await self.notifier.info(
             COMPONENT,
             "ENGINE_STARTED",
-            f"Engine started in {s.trading_mode.value} mode on {s.instrument}; account currency "
-            f"{summary.get('currency')}, NAV {summary.get('NAV')}; model {s.openrouter_model}",
+            f"Engine started in {s.trading_mode.value} mode on {s.instrument} (Capital.com {s.broker_epic}); "
+            f"account {summary['account_id']} currency {summary['currency']}, NAV {summary['nav']}; "
+            f"model {s.openrouter_model}",
             alert=True,
         )
         if not self.llm.enabled:
@@ -532,23 +537,23 @@ class TradingEngine:
         open_trades: dict[str, OpenTradeRisk] = {}
         for t in local_open:
             open_trades[t.broker_trade_id] = OpenTradeRisk(t.instrument, t.current_units, t.open_price, t.stop_loss)
-        for bt in self.reconciler.broker_open_trades:
-            sl = (bt.get("stopLossOrder") or {}).get("price")
-            open_trades[bt["id"]] = OpenTradeRisk(
-                bt["instrument"], int(Decimal(str(bt["currentUnits"]))), float(bt["price"]), float(sl) if sl else None
-            )
+        for p in self.reconciler.broker_open_trades:
+            open_trades[p.deal_id] = OpenTradeRisk(p.instrument, p.units, p.open_price, p.stop_loss)
 
         quote_rate = base_rate = None
         if acct is not None:
-            home_conv = None
+            cross: dict[str, float] = {}
             base, quote = s.instrument_currencies
             if acct.currency not in (base, quote):
-                try:
-                    pricing = await self.client.get_pricing([s.instrument], include_home_conversions=True)
-                    home_conv = pricing.get("homeConversions")
-                except Exception as exc:
-                    log.warning("pricing/home conversion fetch failed: %s", exc)
-            quote_rate, base_rate = conversion_rates(acct.currency, s.instrument, tick.mid, home_conv)
+                for ccy in (base, quote):
+                    try:
+                        rate = await self.client.get_conversion_rate(ccy, acct.currency)
+                    except Exception as exc:
+                        log.warning("conversion rate %s->%s fetch failed: %s", ccy, acct.currency, exc)
+                        rate = None
+                    if rate:
+                        cross[ccy] = rate
+            quote_rate, base_rate = conversion_rates(acct.currency, s.instrument, tick.mid, cross)
 
         kill = controls.get(str(ControlKey.KILL_SWITCH)) or {}
         daily = controls.get(str(ControlKey.DAILY_LOSS_BREAKER)) or {}
@@ -571,7 +576,7 @@ class TradingEngine:
             bid=tick.bid,
             ask=tick.ask,
             price_time=tick.time,
-            tradeable=tick.tradeable,
+            tradeable=tick.tradeable and self.state.broker_tradeable,
             instrument=self.instrument,
             account_currency=acct.currency if acct else "",
             nav=acct.nav if acct else None,

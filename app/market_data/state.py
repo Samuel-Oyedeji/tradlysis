@@ -6,8 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from app.broker.types import Quote
 from app.market_data.candles import CandleAggregator
-from app.market_data.timeutil import is_fx_market_open, parse_time
+from app.market_data.timeutil import is_fx_market_open
 
 
 @dataclass
@@ -30,22 +31,8 @@ class PriceTick:
         return round(self.spread / pip_size, 2)
 
     @classmethod
-    def from_stream(cls, msg: dict[str, Any]) -> PriceTick:
-        bids = msg.get("bids") or []
-        asks = msg.get("asks") or []
-        if bids and asks:
-            bid = float(bids[0]["price"])
-            ask = float(asks[0]["price"])
-        else:
-            bid = float(msg["closeoutBid"])
-            ask = float(msg["closeoutAsk"])
-        return cls(
-            instrument=msg["instrument"],
-            time=parse_time(msg["time"]),
-            bid=bid,
-            ask=ask,
-            tradeable=bool(msg.get("tradeable", True)),
-        )
+    def from_quote(cls, quote: Quote, tradeable: bool = True) -> PriceTick:
+        return cls(instrument=quote.instrument, time=quote.time, bid=quote.bid, ask=quote.ask, tradeable=tradeable)
 
 
 @dataclass
@@ -58,6 +45,9 @@ class MarketState:
     stream_connected: bool = False
     stream_connected_since: datetime | None = None
     reconnects: int = 0
+    # Market status reported by the broker (Capital.com "TRADEABLE"); refreshed by the market service.
+    broker_tradeable: bool = True
+    broker_market_status: str | None = None
     aggregators: dict[str, CandleAggregator] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -113,6 +103,7 @@ class MarketState:
             "ask": t.ask if t else None,
             "spread_pips": t.spread_pips(self.pip_size) if t else None,
             "tradeable": t.tradeable if t else None,
+            "broker_market_status": self.broker_market_status,
             "price_time": t.time.isoformat() if t else None,
             "price_age_seconds": self.price_age_seconds(now),
             "last_heartbeat_at": self.last_heartbeat_at.isoformat() if self.last_heartbeat_at else None,

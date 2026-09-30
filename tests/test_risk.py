@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.broker.oanda import DEFAULT_INSTRUMENTS
+from app.broker.types import DEFAULT_INSTRUMENTS
 from app.risk.conversion import conversion_rates
 from app.risk.engine import OpenTradeRisk, RiskContext, evaluate
 from app.strategy.trend_pullback import TradePlan
@@ -75,13 +75,11 @@ def test_eur_account_uses_conversion(settings):
     assert r.units == pytest.approx(137818, abs=2)
 
 
-def test_third_currency_uses_home_conversions():
-    q, b = conversion_rates(
-        "GBP", "EUR_USD", 1.10,
-        [{"currency": "USD", "accountLoss": "0.75", "positionValue": "0.749"},
-         {"currency": "EUR", "accountLoss": "0.86", "positionValue": "0.855"}],
-    )
+def test_third_currency_uses_cross_rates():
+    q, b = conversion_rates("GBP", "EUR_USD", 1.10, {"USD": 0.75, "EUR": 0.855})
     assert q == 0.75 and b == 0.855
+    # Missing cross rate -> sizing is impossible (the risk engine then rejects the trade).
+    assert conversion_rates("NGN", "EUR_USD", 1.10, {}) == (None, None)
 
 
 @pytest.mark.parametrize(

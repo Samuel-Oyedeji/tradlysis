@@ -1,12 +1,11 @@
-"""Candle representation, OANDA parsing and tick aggregation."""
+"""Candle representation and tick aggregation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
-from app.market_data.timeutil import GRANULARITY_SECONDS, floor_time, parse_time
+from app.market_data.timeutil import GRANULARITY_SECONDS, floor_time
 
 
 @dataclass
@@ -32,28 +31,6 @@ class Bar:
     @property
     def is_bearish(self) -> bool:
         return self.close < self.open
-
-
-def parse_oanda_candle(data: dict[str, Any]) -> Bar:
-    """Parse one candle from ``GET /v3/instruments/{i}/candles`` (price component M required)."""
-    mid = data.get("mid")
-    bid = data.get("bid")
-    ask = data.get("ask")
-    if mid is None:
-        if bid is None or ask is None:
-            raise ValueError("candle has neither mid nor bid/ask components")
-        mid = {k: (float(bid[k]) + float(ask[k])) / 2 for k in ("o", "h", "l", "c")}
-    return Bar(
-        time=parse_time(data["time"]),
-        open=float(mid["o"]),
-        high=float(mid["h"]),
-        low=float(mid["l"]),
-        close=float(mid["c"]),
-        volume=int(data.get("volume", 0)),
-        complete=bool(data.get("complete", False)),
-        bid_close=float(bid["c"]) if bid else None,
-        ask_close=float(ask["c"]) if ask else None,
-    )
 
 
 @dataclass

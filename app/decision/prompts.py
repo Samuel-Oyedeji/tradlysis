@@ -6,10 +6,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-PROMPT_VERSION = "decision-v1"
+PROMPT_VERSION = "decision-v2"
 
 SYSTEM_PROMPT = """You are the setup-confirmation layer of a systematic, rules-based FX research \
-system trading an OANDA demo account. You receive one structured market snapshot. Your only job \
+system trading EUR/USD CFDs on a Capital.com demo account. You receive one structured market snapshot. Your only job \
 is to judge whether the predefined TREND_PULLBACK setup is genuinely present right now.
 
 The TREND_PULLBACK setup (long; short is the mirror image):
