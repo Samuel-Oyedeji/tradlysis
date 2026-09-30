@@ -5,365 +5,299 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <title>Tradlysis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
 <style>
-:root {
-  color-scheme: light;
-  --surface-0: #f4f3f0;
-  --surface-1: #fcfcfb;
-  --border: #e2e0da;
-  --grid: #ecebe7;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #77766f;
-  --series-1: #2a78d6;
-  --good: #0ca30c;
-  --warning: #fab219;
-  --serious: #ec835a;
-  --critical: #d03b3b;
-  --good-ink: #006300;
-  --critical-ink: #b42323;
-  --btn: #0b0b0b;
-  --btn-ink: #ffffff;
+.ov { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 16px; margin-top: 16px; }
+.ov > .stack { gap: 16px; }
+.ctl { display: grid; gap: 8px; }
+.ctl .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.breakers { display: grid; gap: 6px; margin-top: 12px; font-size: 13px; }
+.breakers div { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.event { padding: 10px 16px; border-bottom: 1px solid var(--grid); }
+.event:last-child { border-bottom: 0; }
+.event .top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-3); }
+.event .msg { font-size: 12px; color: var(--ink-2); overflow-wrap: break-word; }
+.news-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--grid); font-size: 13px; }
+.news-row:last-child { border-bottom: 0; }
+.news-row .when { font: 12px var(--mono); color: var(--ink-2); }
+svg#nav-chart { height: 260px; }
+@media (max-width: 899px) {
+  .ov { grid-template-columns: minmax(0, 1fr); }
+  .ov > .stack { display: contents; }
+  svg#nav-chart { height: 200px; }
+  /* Phone order: most operational first. */
+  #p-chart { order: 1; } #p-controls { order: 2; } #p-open { order: 3; } #p-decisions { order: 4; }
+  #p-summary { order: 5; } #p-news { order: 6; } #p-closed { order: 7; } #p-events { order: 8; }
+  /* Decisions become a stacked list on phones: time · decision · confidence, reasons underneath. */
+  #decisions table, #decisions tbody { display: block; }
+  #decisions thead { display: none; }
+  #decisions tr { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 10px; padding: 10px 16px; border-bottom: 1px solid var(--grid); }
+  #decisions td { padding: 0; border: 0; }
+  #decisions td:nth-child(2) { display: none; }
+  #decisions td:nth-child(5) { grid-column: 1 / -1; }
+  #p-decisions .panel-h { flex-wrap: wrap; }
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --surface-0: #111110;
-    --surface-1: #1a1a19;
-    --border: #2d2d2b;
-    --grid: #262624;
-    --text-primary: #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted: #8f8e86;
-    --series-1: #3987e5;
-    --good-ink: #4cc94c;
-    --critical-ink: #ff8a8a;
-    --btn: #f2f2ef;
-    --btn-ink: #0b0b0b;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --surface-0: #111110;
-  --surface-1: #1a1a19;
-  --border: #2d2d2b;
-  --grid: #262624;
-  --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #8f8e86;
-  --series-1: #3987e5;
-  --good-ink: #4cc94c;
-  --critical-ink: #ff8a8a;
-  --btn: #f2f2ef;
-  --btn-ink: #0b0b0b;
-}
-* { box-sizing: border-box; }
-html, body { margin: 0; }
-body {
-  background: var(--surface-0);
-  color: var(--text-primary);
-  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  -webkit-text-size-adjust: 100%;
-}
-main { max-width: 980px; margin: 0 auto; padding: 16px 16px 48px; }
-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; }
-h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
-h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin: 0 0 10px; }
-.sub { color: var(--text-muted); font-size: 13px; }
-.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; min-width: 0; }
-.tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
-@media (min-width: 720px) { .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; } }
-.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; min-width: 0; }
-.tile .label { font-size: 12px; color: var(--text-secondary); }
-.tile .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; overflow-wrap: anywhere; }
-.tile .foot { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); white-space: nowrap; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.pos { color: var(--good-ink); } .neg { color: var(--critical-ink); }
-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-th { text-align: left; font-weight: 600; color: var(--text-secondary); padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
-td { padding: 7px 8px 7px 0; border-bottom: 1px solid var(--grid); vertical-align: top; }
-.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.muted { color: var(--text-muted); }
-.codes { font-size: 11px; color: var(--text-secondary); overflow-wrap: break-word; }
-.event { padding: 8px 0; border-bottom: 1px solid var(--grid); }
-.event:last-child { border-bottom: none; }
-button { font: inherit; font-size: 14px; font-weight: 600; border-radius: 10px; padding: 10px 14px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; min-height: 44px; }
-button.primary { background: var(--btn); color: var(--btn-ink); border-color: var(--btn); }
-button.danger { background: var(--critical); color: #fff; border-color: var(--critical); }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; }
-.chart-wrap { position: relative; }
-svg.chart { width: 100%; height: 200px; display: block; touch-action: pan-y; }
-.tooltip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12); white-space: nowrap; display: none; }
-.row-click { cursor: pointer; }
-.detail { white-space: pre-wrap; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-0); border-radius: 8px; padding: 10px; max-height: 420px; overflow: auto; overflow-wrap: anywhere; }
-.banner { border-radius: 12px; padding: 10px 14px; margin-bottom: 12px; font-weight: 600; border: 1px solid var(--critical); color: var(--critical-ink); background: var(--surface-1); display: none; }
-.linkish { background: none; border: none; padding: 0; min-height: 0; color: var(--series-1); font-weight: 600; font-size: 13px; }
-details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>Tradlysis</h1>
-    <span id="mode" class="pill">…</span>
-    <span id="engine" class="pill">…</span>
-    <span id="killpill" class="pill" style="display:none"></span>
-    <span class="sub" id="updated"></span>
-    <a href="/history" style="margin-left:auto;font-weight:600;color:var(--series-1);text-decoration:none">History →</a>
-  </header>
-  <div id="banner" class="banner"></div>
+<div class="shell">
+  <aside class="side" id="side"></aside>
+  <div>
+    <header class="topbar" id="topbar"></header>
+    <main class="main">
+      <div class="page-h"><h1>Overview</h1><span class="muted" id="updated"></span></div>
+      <div class="banner" id="banner" role="alert"></div>
 
-  <section class="tiles" aria-label="Key figures">
-    <div class="tile"><div class="label">NAV</div><div class="value" id="t-nav">–</div><div class="foot" id="t-nav-foot"></div></div>
-    <div class="tile"><div class="label">Today</div><div class="value" id="t-day">–</div><div class="foot" id="t-day-foot">vs start of trading day</div></div>
-    <div class="tile"><div class="label">Open trades</div><div class="value" id="t-open">–</div><div class="foot" id="t-open-foot"></div></div>
-    <div class="tile"><div class="label" id="t-price-label">Price</div><div class="value" id="t-price">–</div><div class="foot" id="t-price-foot"></div></div>
-  </section>
+      <section class="tiles" aria-label="Key figures">
+        <div class="panel tile"><div class="label">Account value (NAV)</div><div class="value" id="t-nav">–</div><div class="foot" id="t-nav-foot"></div></div>
+        <div class="panel tile"><div class="label">Today</div><div class="value" id="t-day">–</div><div class="foot">since 17:00 New York</div></div>
+        <div class="panel tile"><div class="label">Open trades</div><div class="value" id="t-open">–</div><div class="foot" id="t-open-foot"></div></div>
+        <div class="panel tile"><div class="label" id="t-price-label">EUR/USD</div><div class="value" id="t-price">–</div><div class="foot" id="t-price-foot"></div></div>
+      </section>
 
-  <section class="card">
-    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-      <h2>Account NAV · last 7 days</h2>
-      <button class="linkish" id="toggle-table" type="button">Show table</button>
-    </div>
-    <div class="chart-wrap" id="chart-wrap">
-      <svg class="chart" id="chart" role="img" aria-label="Account NAV over time"></svg>
-      <div class="tooltip" id="tooltip"></div>
-    </div>
-    <div class="scroll" id="chart-table" style="display:none"></div>
-  </section>
+      <section class="panel" style="margin-top:16px" aria-labelledby="h-last">
+        <div class="panel-h"><h2 id="h-last">Last decision</h2><span class="aside" id="last-link"></span></div>
+        <div class="pipe" id="pipe"><div class="empty">Waiting for the first 15-minute cycle.</div></div>
+      </section>
 
-  <section class="card">
-    <h2>Controls</h2>
-    <div class="controls">
-      <button id="btn-kill" class="danger" type="button">Activate kill switch</button>
-      <button id="btn-flatten" type="button">Close all trades</button>
-      <button id="btn-reset-daily" type="button">Reset daily breaker</button>
-      <button id="btn-reset-dd" type="button">Reset drawdown breaker</button>
-    </div>
-    <p class="sub" id="breakers" style="margin:10px 0 0"></p>
-  </section>
+      <div class="ov">
+        <div class="stack">
+          <section class="panel" id="p-chart">
+            <div class="panel-h"><h2>Account value · last 7 days</h2><button class="linkbtn" id="toggle-table" type="button">Show table</button></div>
+            <div class="panel-b">
+              <div class="chart-wrap" id="chart-wrap"><svg class="chart" id="nav-chart" role="img" aria-label="Account value over the last 7 days"></svg><div class="tooltip" id="tooltip"></div></div>
+              <div class="scroll-x" id="chart-table" style="display:none"></div>
+            </div>
+          </section>
+          <section class="panel" id="p-open">
+            <div class="panel-h"><h2>Open trades</h2><a class="aside" href="/history">History →</a></div>
+            <div class="panel-b flush scroll-x" id="open-trades"></div>
+          </section>
+          <section class="panel" id="p-decisions">
+            <div class="panel-h"><h2>Recent decisions</h2>
+              <div class="seg" role="group" aria-label="Which decisions"><button type="button" data-llm="0" aria-pressed="true">Every 15 min</button><button type="button" data-llm="1" aria-pressed="false">Model-reviewed</button></div>
+            </div>
+            <div class="panel-b flush scroll-x" id="decisions"></div>
+          </section>
+          <section class="panel" id="p-closed">
+            <div class="panel-h"><h2>Closed trades</h2><a class="aside" href="/history">All history →</a></div>
+            <div class="panel-b flush scroll-x" id="closed-trades"></div>
+          </section>
+        </div>
 
-  <section class="card">
-    <h2>Open trades</h2>
-    <div class="scroll" id="open-trades"><span class="muted">None</span></div>
-  </section>
-
-  <section class="card">
-    <h2>Decisions (every 15-minute opportunity)</h2>
-    <label class="sub"><input type="checkbox" id="only-llm"> only model-reviewed</label>
-    <div class="scroll" id="decisions" style="margin-top:8px"></div>
-    <div id="decision-detail" style="margin-top:10px"></div>
-  </section>
-
-  <div class="cols">
-    <section class="card">
-      <h2>Experiment summary</h2>
-      <div id="analysis" class="scroll"><span class="muted">No report yet</span></div>
-    </section>
-    <section class="card">
-      <h2>News (EUR / USD)</h2>
-      <div id="news" class="scroll"><span class="muted">–</span></div>
-    </section>
+        <div class="stack">
+          <section class="panel" id="p-controls">
+            <div class="panel-h"><h2>Controls</h2></div>
+            <div class="panel-b">
+              <div class="ctl">
+                <button id="btn-kill" class="btn danger block" type="button">Stop trading (kill switch)</button>
+                <button id="btn-flatten" class="btn block" type="button">Close all open trades</button>
+                <div class="row2">
+                  <button id="btn-reset-daily" class="btn" type="button">Reset daily limit</button>
+                  <button id="btn-reset-dd" class="btn" type="button">Reset drawdown</button>
+                </div>
+              </div>
+              <div class="breakers" id="breakers"></div>
+            </div>
+          </section>
+          <section class="panel" id="p-summary">
+            <div class="panel-h"><h2>Experiment results</h2><span class="aside" id="summary-when"></span></div>
+            <div class="panel-b" id="analysis"><span class="muted">No report yet. The analyzer writes one every hour.</span></div>
+          </section>
+          <section class="panel" id="p-news">
+            <div class="panel-h"><h2>News · EUR &amp; USD</h2><span class="aside">next 48h</span></div>
+            <div class="panel-b flush" id="news"></div>
+          </section>
+          <section class="panel" id="p-events">
+            <div class="panel-h"><h2>System events</h2>
+              <div class="seg" role="group" aria-label="Event level"><button type="button" data-lvl="WARNING" aria-pressed="true">Warnings</button><button type="button" data-lvl="INFO" aria-pressed="false">All</button></div>
+            </div>
+            <div class="panel-b flush" id="events"></div>
+          </section>
+        </div>
+      </div>
+    </main>
   </div>
+</div>
 
-  <section class="card">
-    <h2>Closed trades</h2>
-    <div class="scroll" id="closed-trades"><span class="muted">None</span></div>
-  </section>
-
-  <section class="card">
-    <h2>System events</h2>
-    <label class="sub"><input type="checkbox" id="only-warn" checked> warnings and above</label>
-    <div class="scroll" id="events" style="margin-top:8px"></div>
-  </section>
-</main>
-
+<script src="/assets/app.js"></script>
 <script>
+const {esc, fmt, dt, short, pretty, signed, codes, api} = T;
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const fmt = (n, d = 2) => (n === null || n === undefined || Number.isNaN(n)) ? "–" : Number(n).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
-const shortTime = (iso) => { if (!iso) return "–"; const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"}) : time(iso); };
-const codes = (list) => list.map(c => esc(c).replace(/_/g, "_<wbr>")).join(", ");
-const time = (iso) => iso ? new Date(iso).toLocaleString(undefined, {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "–";
-const signed = (n, d = 2, suffix = "") => n === null || n === undefined ? "–" : `<span class="${n > 0 ? "pos" : n < 0 ? "neg" : ""}">${n > 0 ? "+" : ""}${fmt(n, d)}${suffix}</span>`;
-const STATUS = {
-  good: ["var(--good)", "●"], warning: ["var(--warning)", "▲"], critical: ["var(--critical)", "■"], neutral: ["var(--text-muted)", "○"],
-};
-const pill = (el, kind, text) => { const [c] = STATUS[kind]; el.innerHTML = `<span class="dot" style="background:${c}"></span>${esc(text)}`; el.style.display = ""; };
-
-async function api(path, opts = {}) {
-  const res = await fetch(path, {credentials: "same-origin", ...opts, headers: {"X-Requested-With": "tradlysis", "Content-Type": "application/json", ...(opts.headers || {})}});
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  return res.json();
-}
-
-let state = {status: null, account: null};
+let onlyLlm = false, minLevel = "WARNING", accountSeries = [];
+T.renderShell("overview");
 
 async function refresh() {
-  try {
-    const onlyLlm = $("only-llm").checked;
-    const [status, account, open, closed, decisions, events, news, analysis] = await Promise.all([
-      api("/api/status"), api("/api/account?hours=168"), api("/api/trades?state=OPEN"), api("/api/trades?state=CLOSED&limit=30"),
-      api(`/api/decisions?limit=40${onlyLlm ? "&only_llm=true" : ""}`), api(`/api/events?limit=40&min_level=${$("only-warn").checked ? "WARNING" : "INFO"}`),
-      api("/api/news"), api("/api/analysis/latest"),
-    ]);
-    state = {status, account};
-    renderStatus(status, account); renderChart(account.series); renderOpen(open); renderClosed(closed);
-    renderDecisions(decisions); renderEvents(events); renderNews(news); renderAnalysis(analysis.report);
-    $("updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
-  } catch (e) {
-    $("banner").style.display = "block"; $("banner").textContent = `Could not load data: ${e.message}`;
-    return;
-  }
+  const [status, account, open, closed, decisions, events, news, analysis] = await Promise.all([
+    T.refreshStatus(), api("/api/account?hours=168"), api("/api/trades?state=OPEN"), api("/api/trades?state=CLOSED&limit=12"),
+    api(`/api/decisions?limit=25${onlyLlm ? "&only_llm=true" : ""}`), api(`/api/events?limit=20&min_level=${minLevel}`),
+    api("/api/news"), api("/api/analysis/latest"),
+  ].map(p => p.catch(e => ({__error: e.message}))));
+  if (!status) { showBanner(["Could not reach the API. Check that the api service is running."]); return; }
+  renderStatus(status, account); accountSeries = account.series || []; renderChart();
+  renderOpen(open); renderClosed(closed); renderDecisions(decisions); renderEvents(events); renderNews(news);
+  renderAnalysis(analysis.report); renderPipe(status);
+  $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
 }
 
-function renderStatus(s, account) {
-  pill($("mode"), s.mode === "demo" ? "good" : "critical", s.mode === "demo" ? "DEMO" : "LIVE");
-  pill($("engine"), s.engine_alive ? "good" : "critical", s.engine_alive ? "Engine running" : "Engine offline");
-  const c = s.controls || {};
-  const kill = c.kill_switch || {};
-  const daily = c.daily_loss_breaker || {}; const dd = c.drawdown_breaker || {};
-  const halted = kill.active || daily.tripped || dd.tripped;
-  if (halted) pill($("killpill"), "critical", kill.active ? "Kill switch ON" : "Breaker tripped"); else $("killpill").style.display = "none";
-  const banner = [];
-  if (!s.engine_alive) banner.push("The trading engine has not reported for over a minute.");
-  if (kill.active) banner.push(`Kill switch active${kill.reason ? ": " + kill.reason : ""}.`);
-  if (daily.tripped) banner.push("Daily loss limit hit: no new trades until the next trading day.");
-  if (dd.tripped) banner.push("Max drawdown hit: no new trades until the breaker is reset.");
-  $("banner").style.display = banner.length ? "block" : "none"; $("banner").textContent = banner.join(" ");
-  $("btn-kill").textContent = kill.active ? "Release kill switch" : "Activate kill switch";
-  $("btn-kill").className = kill.active ? "primary" : "danger";
-  $("breakers").textContent = `Daily breaker: ${daily.tripped ? "TRIPPED" : "ok"} · Drawdown breaker: ${dd.tripped ? "TRIPPED" : "ok"}`;
+function showBanner(lines) { $("banner").style.display = lines.length ? "block" : "none"; $("banner").textContent = lines.join(" "); }
 
-  const eng = s.engine || {}; const acct = eng.account || account.latest;
+function renderStatus(s, account) {
+  const c = s.controls || {}, kill = c.kill_switch || {}, daily = c.daily_loss_breaker || {}, dd = c.drawdown_breaker || {};
+  const lines = [];
+  if (!s.engine_alive) lines.push("The trading engine hasn't reported for over a minute. Check the engine service.");
+  if (kill.active) lines.push(`Trading is stopped by the kill switch${kill.reason ? ` (${kill.reason})` : ""}.`);
+  if (daily.tripped) lines.push("Daily loss limit reached: no new trades until the next trading day.");
+  if (dd.tripped) lines.push("Maximum drawdown reached: no new trades until you reset the drawdown limit.");
+  showBanner(lines);
+  $("btn-kill").textContent = kill.active ? "Resume trading" : "Stop trading (kill switch)";
+  $("btn-kill").className = kill.active ? "btn primary block" : "btn danger block";
+  const row = (label, bad, text) => `<div><span class="dim">${label}</span><span><span class="dot ${bad ? "d-bad" : "d-good"}"></span> ${text}</span></div>`;
+  $("breakers").innerHTML = row("Kill switch", kill.active, kill.active ? "On" : "Off") + row("Daily loss limit", daily.tripped, daily.tripped ? "Reached" : "OK") + row("Drawdown limit", dd.tripped, dd.tripped ? "Reached" : "OK");
+
+  const eng = s.engine || {}, acct = eng.account || (account && account.latest);
   if (acct) {
     $("t-nav").textContent = fmt(Number(acct.nav)); $("t-nav-foot").textContent = `${acct.currency} · balance ${fmt(Number(acct.balance))}`;
     const dayStart = c.day_start_nav ? Number(c.day_start_nav.value) : null;
-    if (dayStart) { const pct = (Number(acct.nav) - dayStart) / dayStart * 100; $("t-day").innerHTML = signed(pct, 2, "%"); }
-    $("t-open").textContent = acct.open_trade_count ?? "–"; $("t-open-foot").textContent = `unrealized ${fmt(Number(acct.unrealized_pl))}`;
+    $("t-day").innerHTML = dayStart ? signed((Number(acct.nav) - dayStart) / dayStart * 100, 2, "%") : "–";
+    $("t-open").textContent = acct.open_trade_count ?? "–"; $("t-open-foot").innerHTML = `unrealized ${signed(Number(acct.unrealized_pl))}`;
   }
   const m = eng.market;
   if (m) {
-    $("t-price-label").textContent = (m.instrument || "Price").replace("_", "/");
+    $("t-price-label").textContent = (m.instrument || "EUR_USD").replace("_", "/");
     $("t-price").textContent = m.bid ? fmt((m.bid + m.ask) / 2, 5) : "–";
-    $("t-price-foot").textContent = m.market_open ? `spread ${fmt(m.spread_pips, 1)} pips · ${m.stream_connected ? "stream live" : "stream down"}` : "market closed";
+    $("t-price-foot").textContent = m.market_open === false ? "market closed" : `spread ${fmt(m.spread_pips, 1)} pips · ${m.stream_connected ? "live" : "stream down"}`;
   }
 }
 
-// --- NAV chart: single series, hover crosshair + tooltip, table view ------------------
-let chartPoints = [];
-function renderChart(series) {
-  const svg = $("chart"); const W = svg.clientWidth || 600, H = 200, P = {l: 56, r: 8, t: 10, b: 22};
-  chartPoints = [];
-  if (!series || series.length < 2) { svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="var(--text-muted)" font-size="13">Not enough data yet</text>`; renderChartTable(series || []); return; }
+// Signature: the path the latest 15-minute decision took.
+function renderPipe(s) {
+  const lc = (s.engine || {}).last_cycle;
+  if (!lc) { $("pipe").innerHTML = `<div class="empty">Waiting for the first 15-minute cycle.</div>`; $("last-link").innerHTML = ""; return; }
+  const step = (key, mark, value, sub, off) => `<div class="pipe-step ${off ? "off" : ""}"><div class="k"><span class="mark m-${mark}">${{pass: "✓", fail: "✗", pend: "◷", info: "•", off: ""}[mark]}</span><span class="lbl">${key}</span></div><div class="v" data-k="${key}">${value}</div>${sub ? `<div class="s">${sub}</div>` : ""}</div>`;
+  const decided = lc.candle_time ? new Date(new Date(lc.candle_time).getTime() + 15 * 60000).toISOString() : null;
+  const steps = [step("Candle", "info", esc(short(decided)), "15-minute close")];
+  if (lc.note && lc.request_id == null) {
+    steps.push(step("Setup", "off", "Skipped", esc(lc.note), true));
+  } else {
+    steps.push(step("Setup", lc.candidate ? "pass" : "fail", lc.candidate ? "Found" : "No setup", lc.candidate ? "trend pullback" : "rules not met"));
+  }
+  const tradeDecision = lc.decision === "BUY" || lc.decision === "SELL";
+  if (!lc.llm_called) steps.push(step("Model", "off", "Not asked", lc.candidate ? "blocked before model" : "no setup to confirm", true));
+  else steps.push(step("Model", tradeDecision ? "pass" : "fail", esc(lc.decision || "–"), lc.confidence != null ? `confidence ${fmt(lc.confidence)}` : ""));
+  if (lc.approved == null) steps.push(step("Risk", "off", "Not reached", "", true));
+  else steps.push(step("Risk", lc.approved ? "pass" : "fail", lc.approved ? "Approved" : "Rejected", lc.approved ? "" : codes((lc.rejections || []).slice(0, 2))));
+  if (!lc.order_status) steps.push(step("Order", "off", "None", "", true));
+  else steps.push(step("Order", lc.order_status === "FILLED" ? "pass" : ["REJECTED", "CANCELLED", "FAILED"].includes(lc.order_status) ? "fail" : "pend", esc(pretty(lc.order_status)), ""));
+  $("pipe").innerHTML = steps.join("");
+  $("last-link").innerHTML = lc.request_id ? `<a href="/history/r-${lc.request_id}">Open timeline →</a>` : "";
+}
+
+// NAV chart: single series, hover crosshair + tooltip, table view.
+function renderChart() {
+  const svg = $("nav-chart"), series = accountSeries, W = svg.clientWidth || 700, H = svg.clientHeight || 260, P = {l: 60, r: 10, t: 10, b: 24};
+  if (!series || series.length < 2) { svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--ink-3)" font-size="13">Account history appears after the engine has run for a while.</text>`; renderChartTable(series || []); return; }
   const xs = series.map(p => new Date(p.t).getTime()), ys = series.map(p => p.nav);
   const x0 = Math.min(...xs), x1 = Math.max(...xs); let y0 = Math.min(...ys), y1 = Math.max(...ys);
   const pad = (y1 - y0) * 0.1 || Math.max(1, y1 * 0.001); y0 -= pad; y1 += pad;
   const X = t => P.l + (t - x0) / (x1 - x0 || 1) * (W - P.l - P.r), Y = v => P.t + (1 - (v - y0) / (y1 - y0)) * (H - P.t - P.b);
   let g = "";
-  for (let i = 0; i <= 3; i++) { const v = y0 + (y1 - y0) * i / 3, y = Y(v); g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${P.l - 6}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${fmt(v, 0)}</text>`; }
-  g += `<text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--text-muted)">${esc(time(series[0].t))}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--text-muted)">${esc(time(series[series.length - 1].t))}</text>`;
-  chartPoints = series.map(p => ({x: X(new Date(p.t).getTime()), y: Y(p.nav), p}));
-  const d = chartPoints.map((q, i) => `${i ? "L" : "M"}${q.x.toFixed(1)},${q.y.toFixed(1)}`).join("");
-  g += `<path d="${d}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-  g += `<line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--text-muted)" stroke-width="1" style="display:none"/><circle id="xd" r="4" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2" style="display:none"/>`;
-  g += `<rect x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent" id="hit"/>`;
+  for (let i = 0; i <= 3; i++) { const v = y0 + (y1 - y0) * i / 3, y = Y(v); g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--grid)"/><text x="${P.l - 8}" y="${y + 4}" text-anchor="end" font-size="11" font-family="var(--mono)" fill="var(--ink-3)">${fmt(v, 0)}</text>`; }
+  g += `<text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--ink-3)">${esc(dt(series[0].t))}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--ink-3)">${esc(dt(series[series.length - 1].t))}</text>`;
+  const pts = series.map(p => ({x: X(new Date(p.t).getTime()), y: Y(p.nav), p}));
+  g += `<path d="${pts.map((q, i) => `${i ? "L" : "M"}${q.x.toFixed(1)},${q.y.toFixed(1)}`).join("")}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  g += `<line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--ink-3)" style="display:none"/><circle id="xd" r="4" fill="var(--accent)" stroke="var(--panel)" stroke-width="2" style="display:none"/><rect id="hit" x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent"/>`;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
-  const hit = $("hit"), tip = $("tooltip");
+  const tip = $("tooltip"), hit = $("hit");
   const move = (ev) => {
-    const r = svg.getBoundingClientRect(); const cx = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
-    let best = chartPoints[0]; for (const q of chartPoints) if (Math.abs(q.x - cx) < Math.abs(best.x - cx)) best = q;
-    $("xh").setAttribute("x1", best.x); $("xh").setAttribute("x2", best.x); $("xh").style.display = "";
-    $("xd").setAttribute("cx", best.x); $("xd").setAttribute("cy", best.y); $("xd").style.display = "";
-    tip.innerHTML = `<div class="muted">${esc(time(best.p.t))}</div><div><b>NAV ${fmt(best.p.nav)}</b></div>`;
-    tip.style.display = "block"; const tw = tip.offsetWidth; tip.style.left = Math.min(Math.max(best.x - tw / 2, 0), r.width - tw) + "px"; tip.style.top = "0px";
+    const r = svg.getBoundingClientRect(), cx = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
+    let best = pts[0]; for (const q of pts) if (Math.abs(q.x - cx) < Math.abs(best.x - cx)) best = q;
+    $("xh").setAttribute("x1", best.x); $("xh").setAttribute("x2", best.x); $("xh").style.display = ""; $("xd").setAttribute("cx", best.x); $("xd").setAttribute("cy", best.y); $("xd").style.display = "";
+    tip.innerHTML = `<div class="muted">${esc(dt(best.p.t))}</div><b class="num">${fmt(best.p.nav)}</b>`; tip.style.display = "block";
+    const tw = tip.offsetWidth; tip.style.left = Math.min(Math.max(best.x - tw / 2, 0), r.width - tw) + "px"; tip.style.top = "0px";
   };
   const leave = () => { tip.style.display = "none"; $("xh").style.display = "none"; $("xd").style.display = "none"; };
-  hit.addEventListener("mousemove", move); hit.addEventListener("touchmove", move, {passive: true}); hit.addEventListener("touchstart", move, {passive: true});
+  hit.addEventListener("mousemove", move); hit.addEventListener("touchstart", move, {passive: true}); hit.addEventListener("touchmove", move, {passive: true});
   hit.addEventListener("mouseleave", leave); hit.addEventListener("touchend", leave);
   renderChartTable(series);
 }
 function renderChartTable(series) {
-  const rows = series.slice(-50).reverse().map(p => `<tr><td>${esc(time(p.t))}</td><td>${fmt(p.nav)}</td><td>${fmt(p.balance)}</td></tr>`).join("");
-  $("chart-table").innerHTML = `<table><thead><tr><th>Time</th><th>NAV</th><th>Balance</th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="muted">No data</td></tr>'}</tbody></table>`;
+  const rows = series.slice(-60).reverse().map(p => `<tr><td>${esc(dt(p.t))}</td><td class="num">${fmt(p.nav)}</td><td class="num">${fmt(p.balance)}</td></tr>`).join("");
+  $("chart-table").innerHTML = `<table class="t"><thead><tr><th>Time</th><th class="num">NAV</th><th class="num">Balance</th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="muted">No data</td></tr>'}</tbody></table>`;
 }
-$("toggle-table").onclick = () => { const t = $("chart-table"), w = $("chart-wrap"); const show = t.style.display === "none"; t.style.display = show ? "" : "none"; w.style.display = show ? "none" : ""; $("toggle-table").textContent = show ? "Show chart" : "Show table"; if (!show) renderChart(state.account?.series); };
-window.addEventListener("resize", () => renderChart(state.account?.series));
+$("toggle-table").onclick = () => { const t = $("chart-table"), w = $("chart-wrap"), show = t.style.display === "none"; t.style.display = show ? "" : "none"; w.style.display = show ? "none" : ""; $("toggle-table").textContent = show ? "Show chart" : "Show table"; if (!show) renderChart(); };
+window.addEventListener("resize", renderChart);
 
 function renderOpen(trades) {
-  if (!trades.length) { $("open-trades").innerHTML = '<span class="muted">None</span>'; return; }
-  $("open-trades").innerHTML = `<table><thead><tr><th>Opened</th><th>Side</th><th>Units</th><th>Entry</th><th>SL</th><th>TP</th><th>Unrealized</th></tr></thead><tbody>${trades.map(t => `<tr><td style="white-space:nowrap">${esc(shortTime(t.open_time))}${t.unexpected ? ' <span class="pill"><span class="dot" style="background:var(--critical)"></span>external</span>' : ""}</td><td>${esc(t.direction)}</td><td>${Math.abs(t.current_units)}</td><td>${fmt(t.open_price, 5)}</td><td>${fmt(t.stop_loss, 5)}</td><td>${fmt(t.take_profit, 5)}</td><td>${signed(t.unrealized_pl)}</td></tr>`).join("")}</tbody></table>`;
+  if (!Array.isArray(trades) || !trades.length) { $("open-trades").innerHTML = `<div class="empty">No open trades.</div>`; return; }
+  $("open-trades").innerHTML = `<table class="t"><thead><tr><th>Opened</th><th>Side</th><th class="num">Units</th><th class="num">Entry</th><th class="num">Stop-loss</th><th class="num">Take-profit</th><th class="num">Unrealized</th></tr></thead><tbody>${trades.map(t => `<tr><td>${esc(short(t.open_time))}${t.unexpected ? ' <span class="pill"><span class="dot d-bad"></span>external</span>' : ""}</td><td>${esc(t.direction)}</td><td class="num">${Math.abs(t.current_units).toLocaleString()}</td><td class="num">${fmt(t.open_price, 5)}</td><td class="num">${fmt(t.stop_loss, 5)}</td><td class="num">${fmt(t.take_profit, 5)}</td><td class="num">${signed(t.unrealized_pl)}</td></tr>`).join("")}</tbody></table>`;
 }
 function renderClosed(trades) {
-  if (!trades.length) { $("closed-trades").innerHTML = '<span class="muted">None</span>'; return; }
-  $("closed-trades").innerHTML = `<table><thead><tr><th>Closed</th><th>Side</th><th>Entry</th><th>Exit</th><th>Reason</th><th>R</th><th>P/L</th></tr></thead><tbody>${trades.map(t => `<tr><td style="white-space:nowrap">${esc(shortTime(t.close_time))}</td><td>${esc(t.direction)}</td><td>${fmt(t.open_price, 5)}</td><td>${fmt(t.close_price, 5)}</td><td>${esc(t.close_reason)}</td><td>${signed(t.r_multiple, 2, "R")}</td><td>${signed(t.realized_pl)}</td></tr>`).join("")}</tbody></table>`;
+  if (!Array.isArray(trades) || !trades.length) { $("closed-trades").innerHTML = `<div class="empty">No closed trades yet.</div>`; return; }
+  $("closed-trades").innerHTML = `<table class="t"><thead><tr><th>Closed</th><th>Side</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th class="num">R</th><th class="num">P/L</th></tr></thead><tbody>${trades.map(t => `<tr><td>${esc(short(t.close_time))}</td><td>${esc(t.direction)}</td><td class="num">${fmt(t.open_price, 5)}</td><td class="num">${fmt(t.close_price, 5)}</td><td>${esc(pretty(t.close_reason))}</td><td class="num">${signed(t.r_multiple, 2, "R")}</td><td class="num">${signed(t.realized_pl)}</td></tr>`).join("")}</tbody></table>`;
 }
-function decisionLabel(d) {
-  if (d.decision === "BUY" || d.decision === "SELL") {
-    if (d.risk_approved === true) return `<b>${d.decision}</b> · approved`;
-    return `<b>${d.decision}</b> · <span class="neg">rejected</span>`;
-  }
-  return `WAIT <span class="muted">(${esc((d.source || "").toLowerCase())})</span>`;
+function decisionCell(d) {
+  if (d.decision === "BUY" || d.decision === "SELL") return `<b>${d.decision}</b> · ${d.risk_approved === true ? '<span class="good">approved</span>' : '<span class="bad">rejected</span>'}`;
+  const why = {PREFILTER: "rules", LLM: "model", ERROR: "model error"}[d.source] || pretty(d.source);
+  return `WAIT <span class="muted">· ${esc(why)}</span>`;
 }
 function renderDecisions(rows) {
-  if (!rows.length) { $("decisions").innerHTML = '<span class="muted">No opportunities recorded yet</span>'; return; }
-  $("decisions").innerHTML = `<table><thead><tr><th>Candle</th><th>Setup</th><th>Decision</th><th>Conf.</th><th>Why</th></tr></thead><tbody>${rows.map(d => `<tr class="row-click" data-id="${d.id}"><td style="white-space:nowrap">${esc(shortTime(d.candle_time))}</td><td>${d.candidate ? esc(d.direction) : '<span class="muted">–</span>'}</td><td>${decisionLabel(d)}</td><td>${d.confidence == null ? "–" : fmt(d.confidence, 2)}</td><td class="codes">${codes([...(d.rejection_reasons || []), ...(d.reason_codes || [])].slice(0, 5)) || codes(d.failure_codes || [])}</td></tr>`).join("")}</tbody></table>`;
-  document.querySelectorAll("#decisions tr[data-id]").forEach(tr => tr.onclick = () => showDecision(tr.dataset.id));
-}
-async function showDecision(id) {
-  const d = await api(`/api/decisions/${id}`);
-  const checks = d.risk_check ? d.risk_check.checks.map(c => `<tr><td>${c.passed ? "✓" : "✗"}</td><td>${esc(c.name)}</td><td class="codes">${esc(c.detail)}</td></tr>`).join("") : "";
-  $("decision-detail").innerHTML = `<div class="card" style="margin:0">
-    <div style="display:flex;justify-content:space-between;gap:8px"><b>Opportunity #${id}</b><span><a class="linkish" style="text-decoration:none" href="/history/r-${id}">Open timeline →</a> <button class="linkish" onclick="document.getElementById('decision-detail').innerHTML=''">Close</button></span></div>
-    ${d.decision ? `<p>Decision <b>${esc(d.decision.decision)}</b> (${esc(d.decision.source)}${d.decision.confidence != null ? ", confidence " + fmt(d.decision.confidence) : ""})${d.decision.validation_error ? `<br><span class="neg">${esc(d.decision.validation_error)}</span>` : ""}</p>` : ""}
-    ${checks ? `<h2>Risk checks</h2><div class="scroll"><table><tbody>${checks}</tbody></table></div>` : ""}
-    ${d.order ? `<p>Order <b>${esc(d.order.status)}</b> ${esc(d.order.client_order_id)} ${d.order.fill_price ? "@ " + fmt(d.order.fill_price, 5) : ""} ${esc(d.order.reject_reason || "")}</p>` : ""}
-    <details><summary>Setup check</summary><div class="detail">${esc(JSON.stringify(d.request.strategy_result, null, 2))}</div></details>
-    <details><summary>Snapshot sent to the model</summary><div class="detail">${esc(JSON.stringify(d.request.snapshot, null, 2))}</div></details>
-    ${d.decision && d.decision.raw_response ? `<details><summary>Raw model response</summary><div class="detail">${esc(JSON.stringify(d.decision.raw_response, null, 2))}</div></details>` : ""}
-  </div>`;
-  $("decision-detail").scrollIntoView({behavior: "smooth", block: "nearest"});
+  if (!Array.isArray(rows) || !rows.length) { $("decisions").innerHTML = `<div class="empty">No decisions yet. The engine decides at every 15-minute close while the market is open.</div>`; return; }
+  $("decisions").innerHTML = `<table class="t"><thead><tr><th>Candle</th><th>Setup</th><th>Decision</th><th class="num">Conf.</th><th>Why</th></tr></thead><tbody>${rows.map(d => {
+    const clickable = d.candidate || d.llm_called;
+    return `<tr ${clickable ? `class="click" data-href="/history/r-${d.id}" tabindex="0"` : ""}><td style="white-space:nowrap">${esc(short(d.candle_time))}</td><td>${d.candidate ? esc(d.direction) : '<span class="muted">–</span>'}</td><td style="white-space:nowrap">${decisionCell(d)}</td><td class="num">${d.confidence == null ? "–" : fmt(d.confidence)}</td><td class="codes">${codes([...(d.rejection_reasons || []), ...(d.reason_codes || [])].slice(0, 4)) || codes(d.failure_codes)}</td></tr>`;
+  }).join("")}</tbody></table>`;
+  document.querySelectorAll("#decisions tr[data-href]").forEach(tr => {
+    tr.onclick = () => { location.href = tr.dataset.href; };
+    tr.onkeydown = (e) => { if (e.key === "Enter") location.href = tr.dataset.href; };
+  });
 }
 function renderEvents(rows) {
-  const kind = {INFO: "neutral", WARNING: "warning", ERROR: "critical", CRITICAL: "critical"};
-  $("events").innerHTML = rows.length ? rows.map(e => { const [c, icon] = STATUS[kind[e.level]]; return `<div class="event"><div class="sub"><span style="color:${c}">${icon}</span> ${esc(e.level)} · ${esc(shortTime(e.created_at))} · ${esc(e.component)}</div><div><b>${esc(e.event_type)}</b></div><div class="codes">${esc(e.message)}</div></div>`; }).join("") : '<span class="muted">No events</span>';
+  if (!Array.isArray(rows) || !rows.length) { $("events").innerHTML = `<div class="empty">Nothing to report.</div>`; return; }
+  const tone = {INFO: "d-off", WARNING: "d-warn", ERROR: "d-bad", CRITICAL: "d-bad"};
+  $("events").innerHTML = rows.map(e => `<div class="event"><div class="top"><span><span class="dot ${tone[e.level]}"></span> ${esc(pretty(e.level))} · ${esc(e.component)}</span><span>${esc(short(e.created_at))}</span></div><div><b>${esc(pretty(e.event_type))}</b></div><div class="msg">${esc(e.message)}</div></div>`).join("");
 }
 function renderNews(n) {
-  const ev = n.events.map(e => `<tr><td style="white-space:nowrap">${esc(time(e.time))}</td><td>${esc(e.currency)}</td><td>${e.impact === "HIGH" ? '<span style="color:var(--critical)">■</span> High' : '<span style="color:var(--warning)">▲</span> Med'}</td><td>${esc(e.title)}<div class="codes">F ${esc(e.forecast ?? "–")} · P ${esc(e.previous ?? "–")}${e.actual ? " · A " + esc(e.actual) : ""}</div></td></tr>`).join("");
-  const it = n.interpretations.slice(0, 5).map(i => `<li><b>${esc(i.currency)} ${esc(i.bias)}</b> (${esc(i.tone)}, ${fmt(i.confidence)}) <span class="codes">${esc(i.summary || "")}</span></li>`).join("");
-  $("news").innerHTML = `${ev ? `<table><tbody>${ev}</tbody></table>` : '<span class="muted">No medium/high-impact events in the next 48h</span>'}${it ? `<h2 style="margin-top:12px">Central-bank reads</h2><ul style="padding-left:18px;margin:0">${it}</ul>` : ""}`;
+  if (!n || n.__error) { $("news").innerHTML = `<div class="empty">News unavailable.</div>`; return; }
+  const ev = (n.events || []).map(e => `<div class="news-row"><div class="when">${esc(short(e.time))}</div><div><span class="dot ${e.impact === "HIGH" ? "d-bad" : "d-warn"}"></span> <b>${esc(e.currency)}</b> ${esc(e.title)} <span class="muted">· ${e.impact === "HIGH" ? "high" : "medium"} impact</span><div class="codes">forecast ${esc(e.forecast ?? "–")} · previous ${esc(e.previous ?? "–")}${e.actual ? " · actual " + esc(e.actual) : ""}</div></div></div>`).join("");
+  const it = (n.interpretations || []).slice(0, 3).map(i => `<div class="news-row"><div class="when">${esc(i.currency)}</div><div><b>${esc(pretty(i.bias))}</b> <span class="muted">(${esc(pretty(i.tone))}, ${fmt(i.confidence)})</span><div class="codes">${esc(i.summary || "")}</div></div></div>`).join("");
+  $("news").innerHTML = (ev || `<div class="empty">No medium or high-impact events in the next 48 hours.</div>`) + (it ? `<div class="panel-h" style="border-top:1px solid var(--grid)"><h2>Central-bank reads</h2></div>${it}` : "");
 }
 function renderAnalysis(r) {
-  if (!r) { $("analysis").innerHTML = '<span class="muted">The analyzer has not produced a report yet</span>'; return; }
+  if (!r) { $("analysis").innerHTML = `<span class="muted">No report yet. The analyzer writes one every hour.</span>`; $("summary-when").textContent = ""; return; }
   const m = r.metrics, c = m.closed_trades || {};
-  const row = (k, v) => `<tr><td class="muted">${esc(k)}</td><td>${v}</td></tr>`;
-  const top = Object.entries(m.rejection_reasons || {}).slice(0, 4).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "–";
-  $("analysis").innerHTML = `<table><tbody>
-    ${row("Opportunities", m.opportunities)}${row("Setup candidates", m.setup_candidates)}${row("Model calls", m.llm_calls)}
-    ${row("Risk approved / checked", `${m.risk_approved} / ${m.risk_checks}`)}${row("Closed trades", c.trades || 0)}
-    ${row("Win rate", c.win_rate == null ? "–" : fmt(c.win_rate * 100, 0) + "%")}${row("Avg R / trade", c.avg_r == null ? "–" : signed(c.avg_r, 2, "R"))}
-    ${row("Avg winner / loser", `${c.avg_winner_r == null ? "–" : fmt(c.avg_winner_r) + "R"} / ${c.avg_loser_r == null ? "–" : fmt(c.avg_loser_r) + "R"}`)}
-    ${row("Max drawdown", `${c.max_drawdown_r == null ? "–" : fmt(c.max_drawdown_r) + "R"} · account ${m.account_max_drawdown_pct == null ? "–" : fmt(m.account_max_drawdown_pct) + "%"}`)}
-    ${row("Avg slippage", m.execution?.avg_slippage_pips == null ? "–" : fmt(m.execution.avg_slippage_pips, 2) + " pips")}
-    ${row("Top rejections", `<span class="codes">${top}</span>`)}
-  </tbody></table><p class="sub">Report ${esc(time(r.created_at))}</p>`;
+  const top = Object.entries(m.rejection_reasons || {}).slice(0, 3).map(([k, v]) => `${pretty(k)} (${v})`).join(", ") || "–";
+  const row = (k, v) => `<dt>${esc(k)}</dt><dd>${v}</dd>`;
+  $("analysis").innerHTML = `<dl class="kv">
+    ${row("Opportunities", `<span class="num">${m.opportunities}</span>`)}${row("Setups found", `<span class="num">${m.setup_candidates}</span>`)}
+    ${row("Approved / checked", `<span class="num">${m.risk_approved} / ${m.risk_checks}</span>`)}${row("Closed trades", `<span class="num">${c.trades || 0}</span>`)}
+    ${row("Win rate", c.win_rate == null ? "–" : `<span class="num">${fmt(c.win_rate * 100, 0)}%</span>`)}${row("Average R", c.avg_r == null ? "–" : signed(c.avg_r, 2, "R"))}
+    ${row("Winner / loser", c.avg_winner_r == null && c.avg_loser_r == null ? "–" : `<span class="num">${fmt(c.avg_winner_r)}R / ${fmt(c.avg_loser_r)}R</span>`)}
+    ${row("Max drawdown", `<span class="num">${c.max_drawdown_r == null ? "–" : fmt(c.max_drawdown_r) + "R"} · ${m.account_max_drawdown_pct == null ? "–" : fmt(m.account_max_drawdown_pct) + "%"}</span>`)}
+    ${row("Slippage", m.execution?.avg_slippage_pips == null ? "–" : `<span class="num">${fmt(m.execution.avg_slippage_pips)} pips</span>`)}
+    ${row("Top rejections", esc(top))}
+  </dl>`;
+  $("summary-when").textContent = short(r.created_at);
 }
 
 async function control(path, body, confirmText) {
   if (confirmText && !confirm(confirmText)) return;
-  try { await api(path, {method: "POST", body: JSON.stringify(body || {})}); await refresh(); } catch (e) { alert(e.message); }
+  try { await api(path, {method: "POST", body: JSON.stringify(body || {})}); await refresh(); } catch (e) { alert(`That didn't go through: ${e.message}`); }
 }
 $("btn-kill").onclick = () => {
-  const active = !(state.status?.controls?.kill_switch?.active);
-  const reason = active ? (prompt("Reason for stopping trading?", "manual stop") ?? null) : "";
+  const active = !(T.status?.controls?.kill_switch?.active);
+  const reason = active ? prompt("Why are you stopping trading? (shown in the log)", "manual stop") : "";
   if (reason === null) return;
-  control("/api/controls/kill-switch", {active, reason}, active ? null : "Release the kill switch and allow new trades?");
+  control("/api/controls/kill-switch", {active, reason}, active ? null : "Resume trading? New trades will be allowed again.");
 };
-$("btn-flatten").onclick = () => control("/api/controls/flatten", {reason: "dashboard"}, "Close ALL open trades at market? The engine executes this within a few seconds.");
-$("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset the daily loss breaker?");
-$("btn-reset-dd").onclick = () => control("/api/controls/reset-breaker/drawdown", {}, "Reset the drawdown breaker? Drawdown will be measured from the current NAV.");
-$("only-llm").onchange = refresh; $("only-warn").onchange = refresh;
+$("btn-flatten").onclick = () => control("/api/controls/flatten", {reason: "dashboard"}, "Close ALL open trades at market price? The engine does this within a few seconds.");
+$("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset the daily loss limit and allow trading again today?");
+$("btn-reset-dd").onclick = () => control("/api/controls/reset-breaker/drawdown", {}, "Reset the drawdown limit? Drawdown will be measured from the current account value.");
+document.querySelectorAll("#p-decisions .seg button").forEach(b => b.onclick = () => { onlyLlm = b.dataset.llm === "1"; document.querySelectorAll("#p-decisions .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
+document.querySelectorAll("#p-events .seg button").forEach(b => b.onclick = () => { minLevel = b.dataset.lvl; document.querySelectorAll("#p-events .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
 
 refresh(); setInterval(refresh, 15000);
 </script>

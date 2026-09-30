@@ -65,3 +65,12 @@ async def test_flatten_and_breaker_reset(client, db):
         assert (await get_control(s, ControlKey.FLATTEN_REQUEST))["requested"] is True
     assert (await client.post("/api/controls/reset-breaker/drawdown", auth=AUTH, headers=CSRF)).status_code == 200
     assert (await client.post("/api/controls/reset-breaker/bogus", auth=AUTH, headers=CSRF)).status_code == 404
+
+
+async def test_shared_assets_served(client):
+    css = await client.get("/assets/app.css")
+    js = await client.get("/assets/app.js")
+    assert css.status_code == 200 and "--nav-bg" in css.text
+    assert js.status_code == 200 and "renderShell" in js.text
+    page = (await client.get("/", auth=AUTH)).text
+    assert '/assets/app.css' in page

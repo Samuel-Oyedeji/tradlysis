@@ -86,10 +86,16 @@ uvicorn app.api.main:app --reload --port 8000   # dashboard
 python -m app.experiments.analyzer --once       # print a report
 ```
 
-## Dashboard (mobile-friendly)
+## Dashboard (desktop and mobile)
+
+On desktop the pages share a sidebar with navigation and live status: mode, engine,
+price stream, whether trading is allowed, and alerts. On phones this becomes a top bar
+with Overview/History tabs.
 
 Open `https://<your-host>/` and sign in with `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`.
 
+- **Last decision:** the path the latest 15-minute cycle took (candle → setup → model →
+  risk → order) and where it stopped, linking to its timeline.
 - Status: demo/live, engine heartbeat, kill switch and breaker state, NAV, today's P/L,
   price and spread.
 - NAV chart for the last 7 days, with a table view.
@@ -101,7 +107,8 @@ Open `https://<your-host>/` and sign in with `DASHBOARD_USERNAME` / `DASHBOARD_P
 
 ### History page (`/history`)
 
-Linked from the dashboard header. It lists every trade taken and every setup that was
+Linked from the navigation. On desktop it is a split view: the list stays on the left and the
+selected item's timeline shows on the right. Move through items with ↑/↓. It lists every trade taken and every setup that was
 stopped, grouped by day.
 - **Filters:** All, Taken, Stopped.
 - **Summary:** trades won and lost, plus how many stopped setups *would have* won or lost.

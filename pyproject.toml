@@ -27,7 +27,7 @@ build-backend = "setuptools.build_meta"
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["api/static/*"]
+app = ["api/static/*", "api/static/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
@@ -68,6 +69,8 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         await app.state.db.dispose()
 
     app = FastAPI(title="Tradlysis control plane", version="0.1.0", lifespan=lifespan)
+    # Shared CSS/JS only (no data); every page and API route stays behind authentication.
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
     app.state.settings = settings
 
     def get_db(request: Request) -> Database:

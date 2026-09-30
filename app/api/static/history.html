@@ -5,304 +5,316 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <title>Trade History</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
 <style>
-:root {
-  color-scheme: light;
-  --surface-0: #f4f3f0;
-  --surface-1: #fcfcfb;
-  --border: #e2e0da;
-  --grid: #dcdad3;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #77766f;
-  --series-1: #2a78d6;
-  --good: #0ca30c;
-  --warning: #fab219;
-  --critical: #d03b3b;
-  --neutral: #8f8e86;
-  --good-ink: #006300;
-  --critical-ink: #b42323;
-  --warn-ink: #8a5a00;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --surface-0: #111110;
-    --surface-1: #1a1a19;
-    --border: #2d2d2b;
-    --grid: #3a3a37;
-    --text-primary: #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted: #8f8e86;
-    --series-1: #3987e5;
-    --good-ink: #4cc94c;
-    --critical-ink: #ff8a8a;
-    --warn-ink: #fab219;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --surface-0: #111110;
-  --surface-1: #1a1a19;
-  --border: #2d2d2b;
-  --grid: #3a3a37;
-  --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #8f8e86;
-  --series-1: #3987e5;
-  --good-ink: #4cc94c;
-  --critical-ink: #ff8a8a;
-  --warn-ink: #fab219;
-}
-* { box-sizing: border-box; }
-html, body { margin: 0; }
-body { background: var(--surface-0); color: var(--text-primary); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
-main { max-width: 860px; margin: 0 auto; padding: 16px 16px 56px; }
-a { color: var(--series-1); text-decoration: none; font-weight: 600; }
-h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
-h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin: 18px 0 8px; }
-.top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-.sub { color: var(--text-muted); font-size: 13px; }
-.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; min-width: 0; }
-.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.chip { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; min-width: 0; }
-.chip b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
-.chip span { font-size: 12px; color: var(--text-secondary); }
-.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 12px; }
-.seg button { font: inherit; font-size: 14px; font-weight: 600; border: 0; background: var(--surface-1); color: var(--text-secondary); padding: 10px 14px; min-height: 44px; cursor: pointer; }
-.seg button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); }
-.day { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 6px; }
-.item { display: block; color: inherit; font-weight: normal; background: var(--surface-1); border: 1px solid var(--border); border-left: 4px solid var(--neutral); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
-.item:active { opacity: .8; }
-.item .row1 { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.item .meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; overflow-wrap: break-word; }
-.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; white-space: nowrap; }
-.k-good { color: var(--good-ink); } .k-bad { color: var(--critical-ink); } .k-warn { color: var(--warn-ink); } .k-neutral { color: var(--text-secondary); }
-.b-good { border-left-color: var(--good); } .b-bad { border-left-color: var(--critical); } .b-warn { border-left-color: var(--warning); } .b-neutral { border-left-color: var(--neutral); }
-.hypo { font-size: 12px; margin-top: 4px; }
-button.more { font: inherit; font-weight: 600; width: 100%; min-height: 44px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
-/* ---- timeline tree ---- */
+.stats { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: -6px 0 16px; }
+.stat b { font: 600 18px var(--mono); display: block; }
+.stat > span { font-size: 12px; color: var(--ink-3); }
+.split { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 16px; align-items: start; }
+.listpane { position: sticky; top: 24px; max-height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; }
+.listpane .panel-h { flex: none; }
+.list { overflow-y: auto; flex: 1; }
+.day { font-size: 11px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .07em; padding: 12px 16px 4px; background: var(--panel); position: sticky; top: 0; z-index: 1; }
+.item { display: block; color: inherit; text-decoration: none; padding: 10px 16px 10px 13px; border-left: 3px solid transparent; border-bottom: 1px solid var(--grid); }
+.item:hover { background: var(--panel-2); text-decoration: none; }
+.item[aria-current="true"] { background: var(--panel-2); border-left-color: var(--accent); }
+.item .r1 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.item .r1 .when { font: 500 13px var(--mono); }
+.item .meta { font-size: 12px; color: var(--ink-3); margin-top: 2px; overflow-wrap: break-word; }
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.hypo { font-size: 12px; margin-top: 3px; }
+.more { padding: 12px 16px; }
+.detail-empty { padding: 48px 24px; text-align: center; color: var(--ink-3); }
+.dh { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.dh h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+.dh .sub { color: var(--ink-3); font-size: 13px; }
+.dh .res { text-align: right; }
+.dh .res .badge { font-size: 14px; }
+.facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; margin-bottom: 16px; }
+.facts > div { padding: 12px 14px; min-width: 0; }
+.facts > div + div { border-left: 1px solid var(--grid); }
+.facts .label { font-size: 11px; color: var(--ink-3); font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+.facts .value { font: 600 15px var(--mono); margin-top: 3px; overflow-wrap: anywhere; }
+svg#pchart { height: 280px; }
+/* timeline tree */
 .tree { list-style: none; margin: 0; padding: 0; }
-.tree > li { position: relative; padding: 0 0 18px 34px; }
-.tree > li::before { content: ""; position: absolute; left: 11px; top: 26px; bottom: 0; width: 2px; background: var(--grid); }
+.tree > li { position: relative; padding: 0 0 20px 36px; }
+.tree > li:last-child { padding-bottom: 0; }
+.tree > li::before { content: ""; position: absolute; left: 11px; top: 26px; bottom: 2px; width: 2px; background: var(--grid); }
 .tree > li:last-child::before { display: none; }
-.tree > li.after-stop::before, .tree > li.hypothetical::before { background: repeating-linear-gradient(var(--grid) 0 4px, transparent 4px 8px); }
-.dot { position: absolute; left: 0; top: 0; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff; background: var(--neutral); }
-.s-pass .dot, .s-win .dot { background: var(--good); }
-.s-fail .dot, .s-loss .dot { background: var(--critical); }
-.s-pending .dot, .s-warn .dot { background: var(--warning); color: #0b0b0b; }
-.s-info .dot { background: var(--surface-1); color: var(--text-secondary); border: 2px solid var(--grid); }
-.hypothetical .dot { border-style: dashed; }
-.ntitle { font-weight: 700; }
-.ntime { font-size: 12px; color: var(--text-muted); }
-.nsum { font-size: 14px; color: var(--text-secondary); overflow-wrap: break-word; }
-.stop { display: inline-block; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--critical-ink); border: 1px solid var(--critical); border-radius: 999px; padding: 1px 8px; }
-dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 6px 0 0; font-size: 13px; }
-dl.kv dt { color: var(--text-muted); } dl.kv dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.children { list-style: none; margin: 8px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--grid); }
+.tree > li.dash::before { background: repeating-linear-gradient(var(--line) 0 4px, transparent 4px 8px); }
+.tree .mark { position: absolute; left: 0; top: 0; width: 24px; height: 24px; font-size: 12px; }
+.nhead { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+.ntitle { font-weight: 600; font-size: 15px; }
+.ntime { font: 12px var(--mono); color: var(--ink-3); }
+.nsum { color: var(--ink-2); overflow-wrap: break-word; margin-top: 1px; }
+.stop { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 12px; font-weight: 700; color: var(--bad-ink); border: 1px solid var(--bad); border-radius: 999px; padding: 1px 9px; }
+.nbody { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 8px 28px; margin-top: 8px; }
+.nbody.one { grid-template-columns: minmax(0, 1fr); }
+.children { list-style: none; margin: 0; padding: 0 0 0 12px; border-left: 2px solid var(--grid); }
 .children li { position: relative; padding: 3px 0 3px 14px; font-size: 13px; }
 .children li::before { content: ""; position: absolute; left: -2px; top: 13px; width: 10px; border-top: 2px solid var(--grid); }
 .children .ci { font-weight: 700; margin-right: 4px; }
-.children .cd { color: var(--text-muted); overflow-wrap: break-word; }
-details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; margin-top: 6px; }
-.raw { white-space: pre-wrap; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-0); border-radius: 8px; padding: 10px; max-height: 360px; overflow: auto; overflow-wrap: anywhere; }
-/* ---- chart ---- */
-.chart-wrap { position: relative; }
-svg.chart { width: 100%; height: 240px; display: block; touch-action: pan-y; }
-.tooltip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12); white-space: nowrap; display: none; }
-.linkish { background: none; border: none; padding: 0; color: var(--series-1); font: inherit; font-weight: 600; font-size: 13px; cursor: pointer; }
-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--grid); }
-.scroll { overflow-x: auto; }
-.empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+.children .cd { color: var(--ink-3); overflow-wrap: break-word; }
+.kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--ink-2); }
+@media (max-width: 1280px) { .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } .facts > div:nth-child(4) { border-left: 0; } .facts > div:nth-child(n+4) { border-top: 1px solid var(--grid); } .nbody { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 899px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .listpane { position: static; max-height: none; }
+  body.detail .listpane, body.detail .stats { display: none; }
+  body:not(.detail) .detailpane { display: none; }
+  svg#pchart { height: 220px; }
+  .dh .res { text-align: left; }
+  .keys { display: none; }
+}
 </style>
 </head>
 <body>
-<main id="app"><p class="sub">Loading…</p></main>
+<div class="shell">
+  <aside class="side" id="side"></aside>
+  <div>
+    <header class="topbar" id="topbar"></header>
+    <main class="main">
+      <div class="page-h"><h1>History</h1><span class="muted keys">Use <span class="kbd">↑</span> <span class="kbd">↓</span> to move between items</span></div>
+      <div class="stats" id="stats"></div>
+      <div class="split">
+        <section class="panel listpane" aria-label="Trades and stopped setups">
+          <div class="panel-h">
+            <div class="seg" role="group" aria-label="Filter">
+              <button type="button" data-f="all" aria-pressed="true">All</button><button type="button" data-f="traded" aria-pressed="false">Taken</button><button type="button" data-f="stopped" aria-pressed="false">Stopped</button>
+            </div>
+            <span class="aside" id="count"></span>
+          </div>
+          <div class="list" id="list"><div class="empty">Loading…</div></div>
+        </section>
+        <section class="detailpane" id="detail" aria-live="polite"></section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/assets/app.js"></script>
 <script>
-const app = document.getElementById("app");
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const fmt = (n, d = 2) => n === null || n === undefined || Number.isNaN(Number(n)) ? "–" : Number(n).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
-const dt = (iso) => iso ? new Date(iso).toLocaleString(undefined, {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
-const tm = (iso) => iso ? new Date(iso).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"}) : "";
-const day = (iso) => iso ? new Date(iso).toLocaleDateString(undefined, {weekday: "short", month: "short", day: "numeric"}) : "Unknown";
-const pretty = (code) => String(code || "").replace(/_/g, " ").toLowerCase();
+const {esc, fmt, dt, tm, day, pretty, api} = T;
+const $ = (id) => document.getElementById(id);
+const isDesktop = () => window.matchMedia("(min-width: 900px)").matches;
+T.renderShell("history"); T.refreshStatus(); setInterval(T.refreshStatus, 30000);
 
-async function api(path) {
-  const r = await fetch(path, {credentials: "same-origin", headers: {"X-Requested-With": "tradlysis"}});
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-  return r.json();
-}
+let state = {filter: "all", offset: 0, items: [], total: 0, selected: null};
+const pathId = () => { const m = location.pathname.match(/^\/history\/([^/]+)$/); return m ? decodeURIComponent(m[1]) : null; };
 
-// Outcome -> [tone, icon]; icons + text so meaning never relies on color alone.
-function tone(item) {
-  const o = item.outcome;
+// Outcome -> [css class, icon]; icon + words so meaning never relies on colour alone.
+function tone(it) {
+  const o = it.outcome;
   if (o === "WON") return ["good", "▲"];
   if (o === "LOST") return ["bad", "▼"];
-  if (o === "OPEN" || o === "ORDER_PENDING" || o === "FILLED_AWAITING_SYNC") return ["warn", "◷"];
-  if (o === "EXTERNAL") return ["warn", "!"];
-  if (item.category === "STOPPED") return ["neutral", "■"];
-  return ["neutral", "•"];
+  if (o === "OPEN" || o === "ORDER_PENDING" || o === "FILLED_AWAITING_SYNC" || o === "EXTERNAL") return ["warn", "◷"];
+  if (it.category === "STOPPED") return ["dim", "■"];
+  return ["dim", "•"];
 }
 function hypoLine(h) {
   if (!h) return "";
-  const cls = h.result === "WOULD_WIN" ? "k-good" : h.result === "WOULD_LOSE" ? "k-bad" : "k-neutral";
+  const cls = h.result === "WOULD_WIN" ? "good" : h.result === "WOULD_LOSE" ? "bad" : "muted";
   const icon = h.result === "WOULD_WIN" ? "▲" : h.result === "WOULD_LOSE" ? "▼" : "…";
   return `<div class="hypo ${cls}">↳ ${icon} ${esc(h.label)}</div>`;
 }
 
-// ------------------------------------------------------------------ list view
-let listState = {filter: "all", offset: 0, items: [], total: 0, summary: null};
-
-async function renderList(reset = true) {
-  if (reset) { listState.offset = 0; listState.items = []; }
-  const q = `/api/history?filter=${listState.filter}&limit=50&offset=${listState.offset}`;
+// ------------------------------------------------------------------ list
+async function loadList(reset = true) {
+  if (reset) { state.offset = 0; state.items = []; }
   let data;
-  try { data = await api(q); } catch (e) { app.innerHTML = `<p class="k-bad">Could not load history: ${esc(e.message)}</p>`; return; }
-  listState.items = listState.items.concat(data.items); listState.total = data.total; listState.summary = data.summary;
+  try { data = await api(`/api/history?filter=${state.filter}&limit=50&offset=${state.offset}`); }
+  catch (e) { $("list").innerHTML = `<div class="empty bad">Couldn't load history: ${esc(e.message)}</div>`; return; }
+  state.items = state.items.concat(data.items); state.total = data.total;
   const s = data.summary;
-  const chip = (v, label, cls = "") => `<div class="chip"><b class="${cls}">${v}</b><span>${label}</span></div>`;
-  let html = `<div class="top"><a href="/">← Dashboard</a><h1>History</h1></div>
-    <p class="sub" style="margin-top:-6px">Every trade taken and every setup that was stopped. Tap one to see its timeline.</p>
-    <div class="chips">
-      ${chip(s.taken, "trades taken")}${chip(`${s.won} / ${s.lost}`, "won / lost")}${chip(s.open, "open")}
-      ${chip(s.stopped, "setups stopped")}
-      ${chip(`<span class="k-good">▲${s.stopped_would_win}</span> <span class="k-bad">▼${s.stopped_would_lose}</span>`, "stopped: would have won / lost")}
-    </div>
-    <div class="seg" role="group" aria-label="Filter">
-      ${["all", "traded", "stopped"].map(f => `<button data-f="${f}" aria-pressed="${listState.filter === f}">${{all: "All", traded: "Taken", stopped: "Stopped"}[f]}</button>`).join("")}
-    </div><div id="list">`;
-  if (!listState.items.length) html += `<div class="empty">Nothing here yet. Setups appear once the engine finds them.</div>`;
-  let lastDay = null;
-  for (const it of listState.items) {
-    const d = day(it.time);
-    if (d !== lastDay) { html += `<div class="day">${esc(d)}</div>`; lastDay = d; }
-    const [t, icon] = tone(it);
-    const kcls = {good: "k-good", bad: "k-bad", warn: "k-warn", neutral: "k-neutral"}[t];
-    const bcls = {good: "b-good", bad: "b-bad", warn: "b-warn", neutral: "b-neutral"}[t];
-    const detail = it.category === "TRADED"
-      ? [it.pl != null ? `P/L ${fmt(it.pl)}` : null, it.confidence != null ? `confidence ${fmt(it.confidence)}` : null].filter(Boolean).join(" · ")
-      : (it.reasons || []).map(pretty).join(", ");
-    const ctx = [it.regime ? pretty(it.regime) : null, it.news_risk ? `news ${it.news_risk}` : null, it.risk_reward ? `1:${it.risk_reward}` : null].filter(Boolean).join(" · ");
-    html += `<a class="item ${bcls}" href="/history/${esc(it.id)}">
-      <div class="row1"><span><b>${esc(tm(it.time))}</b> · ${esc(it.direction || "–")} EUR/USD</span><span class="badge ${kcls}">${icon} ${esc(it.label)}</span></div>
-      ${detail ? `<div class="meta">${esc(detail)}</div>` : ""}
-      ${ctx ? `<div class="meta">${esc(ctx)}</div>` : ""}
-      ${hypoLine(it.hypothetical)}
-    </a>`;
-  }
-  html += `</div>`;
-  if (listState.items.length < listState.total) html += `<button class="more" id="more">Load more (${listState.total - listState.items.length})</button>`;
-  app.innerHTML = html;
-  app.querySelectorAll(".seg button").forEach(b => b.onclick = () => { listState.filter = b.dataset.f; renderList(true); });
-  const more = document.getElementById("more");
-  if (more) more.onclick = () => { listState.offset += 50; renderList(false); };
+  const stat = (v, label) => `<div class="stat"><b>${v}</b><span>${label}</span></div>`;
+  $("stats").innerHTML = stat(s.taken, "trades taken") + stat(`<span class="good">${s.won}</span> / <span class="bad">${s.lost}</span>`, "won / lost")
+    + stat(s.open, "open") + stat(s.stopped, "setups stopped")
+    + stat(`<span class="good">▲ ${s.stopped_would_win}</span> <span class="bad">▼ ${s.stopped_would_lose}</span>`, "stopped setups: would have won / lost");
+  $("count").textContent = `${state.total} item${state.total === 1 ? "" : "s"}`;
+  renderList();
 }
 
-// ------------------------------------------------------------------ detail view
-const NODE_ICON = {pass: "✓", fail: "✗", info: "•", pending: "◷", win: "▲", loss: "▼", warn: "!"};
+function renderList() {
+  if (!state.items.length) {
+    const msg = {all: "No trades or setups yet. They appear here as soon as the engine finds a setup.", traded: "No trades taken yet.", stopped: "No stopped setups yet."}[state.filter];
+    $("list").innerHTML = `<div class="empty">${msg}</div>`; return;
+  }
+  let html = "", lastDay = null;
+  for (const it of state.items) {
+    const d = day(it.time);
+    if (d !== lastDay) { html += `<div class="day">${esc(d)}</div>`; lastDay = d; }
+    const [cls, icon] = tone(it);
+    const detail = it.category === "TRADED"
+      ? [it.r_multiple != null ? `${it.r_multiple > 0 ? "+" : ""}${fmt(it.r_multiple)}R` : null, it.pl != null ? `P/L ${fmt(it.pl)}` : null, it.confidence != null ? `confidence ${fmt(it.confidence)}` : null].filter(Boolean).join(" · ")
+      : (it.reasons || []).map(pretty).join(", ");
+    html += `<a class="item" href="/history/${esc(it.id)}" data-id="${esc(it.id)}" ${it.id === state.selected ? 'aria-current="true"' : ""}>
+      <div class="r1"><span class="when">${esc(tm(it.time))} · ${esc(it.direction || "–")}</span><span class="badge ${cls}">${icon} ${esc(it.label)}</span></div>
+      ${detail ? `<div class="meta">${esc(detail)}</div>` : ""}
+      ${hypoLine(it.hypothetical)}</a>`;
+  }
+  if (state.items.length < state.total) html += `<div class="more"><button class="btn block" id="more" type="button">Load more (${state.total - state.items.length})</button></div>`;
+  $("list").innerHTML = html;
+  $("list").querySelectorAll("a.item").forEach(a => a.onclick = (e) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+    e.preventDefault(); select(a.dataset.id, true);
+  });
+  const more = $("more"); if (more) more.onclick = () => { state.offset += 50; loadList(false); };
+}
+
+function markActive() {
+  $("list").querySelectorAll("a.item").forEach(a => a.setAttribute("aria-current", a.dataset.id === state.selected ? "true" : "false"));
+  const cur = $("list").querySelector('a.item[aria-current="true"]');
+  if (cur && isDesktop()) cur.scrollIntoView({block: "nearest"});
+}
+
+async function select(id, push) {
+  state.selected = id;
+  if (push) history.pushState({id}, "", id ? `/history/${id}` : "/history");
+  document.body.classList.toggle("detail", !!id);
+  markActive();
+  if (!id) { $("detail").innerHTML = `<div class="panel detail-empty">Select a trade or stopped setup to see its timeline.</div>`; return; }
+  $("detail").innerHTML = `<div class="panel detail-empty">Loading…</div>`;
+  await renderDetail(id);
+  if (!isDesktop()) window.scrollTo(0, 0);
+}
+
+window.addEventListener("popstate", () => select(pathId(), false));
+document.querySelectorAll(".seg button[data-f]").forEach(b => b.onclick = async () => {
+  state.filter = b.dataset.f; document.querySelectorAll(".seg button[data-f]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  await loadList(true);
+  if (isDesktop() && state.items.length && !state.items.some(i => i.id === state.selected)) select(state.items[0].id, true);
+});
+document.addEventListener("keydown", (e) => {
+  if (!isDesktop() || ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
+  const keys = {ArrowDown: 1, j: 1, ArrowUp: -1, k: -1};
+  if (!(e.key in keys) || !state.items.length) return;
+  e.preventDefault();
+  const i = state.items.findIndex(x => x.id === state.selected);
+  const next = state.items[Math.min(Math.max(i + keys[e.key], 0), state.items.length - 1)];
+  if (next && next.id !== state.selected) select(next.id, true);
+});
+
+// ------------------------------------------------------------------ detail
+const MARK = {pass: ["pass", "✓"], fail: ["fail", "✗"], info: ["info", "•"], pending: ["pend", "◷"], warn: ["pend", "!"], win: ["pass", "▲"], loss: ["fail", "▼"]};
 
 function childList(children) {
   if (!children.length) return "";
+  const rows = (list) => `<ul class="children">${list.map(c => `<li><span class="ci ${c.status === "pass" ? "good" : c.status === "fail" ? "bad" : "muted"}">${(MARK[c.status] || MARK.info)[1]}</span>${esc(c.title)} <span class="cd">${esc(c.summary)}</span></li>`).join("")}</ul>`;
+  if (children.length <= 8) return rows(children);
   const failed = children.filter(c => c.status === "fail");
-  const rows = (list) => `<ul class="children">${list.map(c => `<li><span class="ci ${c.status === "pass" ? "k-good" : c.status === "fail" ? "k-bad" : "k-neutral"}">${NODE_ICON[c.status] || "•"}</span>${esc(c.title)} <span class="cd">${esc(c.summary)}</span></li>`).join("")}</ul>`;
-  if (children.length <= 7) return rows(children);
-  const head = failed.length ? rows(failed) : "";
-  return `${head}<details><summary>Show all ${children.length}</summary>${rows(children)}</details>`;
+  return `${failed.length ? rows(failed) : `<div class="muted" style="font-size:13px">All ${children.length} passed.</div>`}<details><summary>Show all ${children.length}</summary>${rows(children)}</details>`;
 }
 
-function nodeHtml(n, afterStop) {
+function nodeHtml(n) {
+  const [mcls, icon] = MARK[n.status] || MARK.info;
   const kv = n.details.length ? `<dl class="kv">${n.details.map(d => `<dt>${esc(d.label)}</dt><dd>${esc(d.value)}</dd>`).join("")}</dl>` : "";
+  const kids = childList(n.children);
+  const body = kv || kids ? `<div class="nbody ${kv && kids ? "" : "one"}">${kv ? `<div>${kv}</div>` : ""}${kids ? `<div>${kids}</div>` : ""}</div>` : "";
   const raw = n.raw ? `<details><summary>Raw data</summary><div class="raw">${esc(JSON.stringify(n.raw, null, 2))}</div></details>` : "";
-  const cls = [`s-${n.status}`, afterStop ? "after-stop" : "", n.key === "hypothetical" ? "hypothetical" : ""].join(" ");
-  return `<li class="${cls}"><span class="dot" aria-hidden="true">${NODE_ICON[n.status] || "•"}</span>
-    <div class="ntitle">${esc(n.title)} <span class="sr">(${esc(n.status)})</span></div>
-    ${n.time ? `<div class="ntime">${esc(dt(n.time))}</div>` : ""}
+  return `<li class="${n.stopped_here ? "dash" : ""}"><span class="mark m-${mcls}" aria-hidden="true">${icon}</span>
+    <div class="nhead"><span class="ntitle">${esc(n.title)} <span class="sr">(${esc(n.status)})</span></span>${n.time ? `<span class="ntime">${esc(dt(n.time))}</span>` : ""}</div>
     ${n.summary ? `<div class="nsum">${esc(n.summary)}</div>` : ""}
-    ${n.stopped_here ? `<span class="stop">■ Stopped here</span>` : ""}
-    ${kv}${childList(n.children)}${raw}</li>`;
+    ${n.stopped_here ? `<span class="stop">■ Stopped here</span>` : ""}${body}${raw}</li>`;
 }
 
 async function renderDetail(id) {
   let d;
-  try { d = await api(`/api/history/${encodeURIComponent(id)}`); } catch (e) { app.innerHTML = `<div class="top"><a href="/history">← History</a></div><p class="k-bad">${esc(e.message)}</p>`; return; }
-  const it = d.item; const [t, icon] = tone(it);
-  const kcls = {good: "k-good", bad: "k-bad", warn: "k-warn", neutral: "k-neutral"}[t];
-  // The stopped node's trunk is dashed: anything below it (the "what would have happened" node) did not happen.
-  const nodes = d.timeline.map(n => nodeHtml(n, !!n.stopped_here)).join("");
-  app.innerHTML = `<div class="top"><a href="/history">← History</a></div>
-    <h1>${esc(it.direction || "")} EUR/USD · ${esc(dt(it.time))}</h1>
-    <p class="badge ${kcls}" style="font-size:14px;margin:6px 0 2px">${icon} ${esc(it.label)}</p>
-    ${hypoLine(it.hypothetical)}
-    <div class="card" style="margin-top:12px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline"><h2 style="margin:0 0 6px">Price (15-minute closes)</h2><button class="linkish" id="tbl">Show table</button></div>
-      <div class="chart-wrap" id="cw"><svg class="chart" id="chart" role="img" aria-label="Price path with entry, stop-loss and take-profit"></svg><div class="tooltip" id="tip"></div></div>
-      <div class="scroll" id="ctable" style="display:none"></div>
+  try { d = await api(`/api/history/${encodeURIComponent(id)}`); }
+  catch (e) { $("detail").innerHTML = `<div class="panel detail-empty">${String(e.message).startsWith("404") ? "This item doesn't exist (it may belong to another experiment)." : esc(e.message)}</div>`; return; }
+  if (state.selected !== id) return; // user moved on while loading
+  const it = d.item, [cls, icon] = tone(it), L = d.levels;
+  const decisionNode = d.timeline.find(n => n.key === "decision");
+  const resultValue = it.category === "TRADED"
+    ? (it.r_multiple != null ? `<span class="${it.r_multiple >= 0 ? "good" : "bad"}">${it.r_multiple > 0 ? "+" : ""}${fmt(it.r_multiple)}R</span>` : esc(it.label))
+    : (it.hypothetical ? `<span class="${it.hypothetical.result === "WOULD_WIN" ? "good" : it.hypothetical.result === "WOULD_LOSE" ? "bad" : "muted"}">${it.hypothetical.r != null ? `${it.hypothetical.r > 0 ? "+" : ""}${fmt(it.hypothetical.r)}R*` : "–"}</span>` : "–");
+  const fact = (label, value) => `<div><div class="label">${label}</div><div class="value">${value}</div></div>`;
+  $("detail").innerHTML = `
+    <div class="dh">
+      <div>${isDesktop() ? "" : `<a href="/history" id="back">← All history</a>`}
+        <h2>${esc(it.direction || "")} EUR/USD</h2><div class="sub">${esc(dt(it.time))}${it.regime ? ` · ${esc(pretty(it.regime))}` : ""}${it.news_risk ? ` · news ${esc(it.news_risk)}` : ""}</div></div>
+      <div class="res"><span class="badge ${cls}">${icon} ${esc(it.label)}</span>${hypoLine(it.hypothetical)}</div>
     </div>
-    <h2>Timeline</h2>
-    <div class="card"><ol class="tree">${nodes}</ol></div>`;
-  drawChart(d);
-  window.onresize = () => drawChart(d);
-  document.getElementById("tbl").onclick = () => {
-    const tb = document.getElementById("ctable"), cw = document.getElementById("cw"), show = tb.style.display === "none";
-    tb.style.display = show ? "" : "none"; cw.style.display = show ? "none" : ""; document.getElementById("tbl").textContent = show ? "Show chart" : "Show table";
-    if (show) tb.innerHTML = `<table><thead><tr><th>Time</th><th>High</th><th>Low</th><th>Close</th></tr></thead><tbody>${d.price_path.map(b => `<tr><td>${esc(dt(b.t))}</td><td>${fmt(b.h, 5)}</td><td>${fmt(b.l, 5)}</td><td>${fmt(b.c, 5)}</td></tr>`).join("")}</tbody></table>`;
+    <div class="panel facts">
+      ${fact("Entry", fmt(L.entry, 5))}${fact("Stop-loss", fmt(L.stop_loss, 5))}${fact("Take-profit", fmt(L.take_profit, 5))}
+      ${fact("Risk:reward", it.risk_reward ? `1:${esc(it.risk_reward)}` : "–")}${fact("Confidence", it.confidence != null ? fmt(it.confidence) : (decisionNode ? "–" : "n/a"))}
+      ${fact(it.category === "TRADED" ? "Result" : "Would have", resultValue)}
+    </div>
+    <section class="panel" style="margin-bottom:16px">
+      <div class="panel-h"><h2>Price · 15-minute closes</h2><button class="linkbtn" id="tbl" type="button">Show table</button></div>
+      <div class="panel-b"><div class="chart-wrap" id="cw"><svg class="chart" id="pchart" role="img" aria-label="Price path with entry, stop-loss and take-profit levels"></svg><div class="tooltip" id="tip"></div></div><div class="scroll-x" id="ctable" style="display:none"></div></div>
+    </section>
+    <section class="panel">
+      <div class="panel-h"><h2>Timeline</h2><span class="aside">${it.category === "STOPPED" ? "stopped setups end where they were blocked" : ""}</span></div>
+      <div class="panel-b"><ol class="tree">${d.timeline.map(nodeHtml).join("")}</ol></div>
+    </section>
+    ${it.category === "STOPPED" && it.hypothetical ? `<p class="muted" style="font-size:12px">* Estimated from 15-minute mid-price candles after the decision; ignores spread and slippage.</p>` : ""}`;
+  const back = $("back"); if (back) back.onclick = (e) => { e.preventDefault(); select(null, true); };
+  drawChart(d); window.onresize = () => drawChart(d);
+  $("tbl").onclick = () => {
+    const tb = $("ctable"), cw = $("cw"), show = tb.style.display === "none";
+    tb.style.display = show ? "" : "none"; cw.style.display = show ? "none" : ""; $("tbl").textContent = show ? "Show chart" : "Show table";
+    if (show) tb.innerHTML = `<table class="t"><thead><tr><th>Time</th><th class="num">High</th><th class="num">Low</th><th class="num">Close</th></tr></thead><tbody>${d.price_path.map(b => `<tr><td>${esc(dt(b.t))}</td><td class="num">${fmt(b.h, 5)}</td><td class="num">${fmt(b.l, 5)}</td><td class="num">${fmt(b.c, 5)}</td></tr>`).join("")}</tbody></table>`;
     else drawChart(d);
   };
 }
 
 function drawChart(d) {
-  const svg = document.getElementById("chart"); if (!svg) return;
-  const pts = d.price_path, W = svg.clientWidth || 600, H = 240, P = {l: 8, r: 80, t: 16, b: 22};
-  if (pts.length < 2) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--text-muted)" font-size="13">No candle data for this period</text>`; return; }
+  const svg = $("pchart"); if (!svg) return;
+  const pts = d.price_path, W = svg.clientWidth || 700, H = svg.clientHeight || 280, P = {l: 8, r: 84, t: 18, b: 24};
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (pts.length < 2) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--ink-3)" font-size="13">No candle data for this period yet.</text>`; return; }
   const L = d.levels, xs = pts.map(p => new Date(p.t).getTime());
   const vals = pts.flatMap(p => [p.h, p.l]).concat([L.entry, L.stop_loss, L.take_profit, L.exit].filter(v => v != null));
   let y0 = Math.min(...vals), y1 = Math.max(...vals); const pad = (y1 - y0) * 0.08 || 0.0005; y0 -= pad; y1 += pad;
   const x0 = xs[0], x1 = xs[xs.length - 1];
   const X = t => P.l + (t - x0) / (x1 - x0 || 1) * (W - P.l - P.r), Y = v => P.t + (1 - (v - y0) / (y1 - y0)) * (H - P.t - P.b);
   let g = "";
-  // Reference lines, labelled directly at the right edge (text in ink, line carries the colour).
-  const ref = (v, label, color, dash) => { if (v == null) return; const y = Y(v); g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="${color}" stroke-width="1.5" ${dash ? 'stroke-dasharray="5 4"' : ""}/><text x="${W - P.r + 4}" y="${y + 4}" font-size="11" fill="var(--text-secondary)">${label}</text>`; };
+  const ref = (v, label, color, dash) => { if (v == null) return; const y = Y(v); g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="${color}" stroke-width="1.5" ${dash ? 'stroke-dasharray="5 4"' : ""}/><text x="${W - P.r + 6}" y="${y + 4}" font-size="11" font-family="var(--mono)" fill="var(--ink-2)">${label}</text>`; };
   ref(L.take_profit, `TP ${fmt(L.take_profit, 5)}`, "var(--good)", true);
-  ref(L.stop_loss, `SL ${fmt(L.stop_loss, 5)}`, "var(--critical)", true);
-  ref(L.entry, `In ${fmt(L.entry, 5)}`, "var(--text-muted)", false);
-  // Event markers (decision / open / close / hypothetical resolution).
+  ref(L.stop_loss, `SL ${fmt(L.stop_loss, 5)}`, "var(--bad)", true);
+  ref(L.entry, `In ${fmt(L.entry, 5)}`, "var(--ink-3)", false);
   const M = d.markers;
-  // Markers closer than ~48px share one line and a combined label, so labels never collide.
   const marks = [[M.decision, "decision"], [M.open, "open"], [M.close, "close"], [M.hypothetical_resolved, "hit"]]
     .filter(([iso]) => iso).map(([iso, label]) => [X(new Date(iso).getTime()), label, new Date(iso).getTime()])
     .filter(([, , t]) => t >= x0 && t <= x1).sort((a, b) => a[0] - b[0]);
   const merged = [];
   for (const [x, label] of marks) { const last = merged[merged.length - 1]; if (last && x - last[0] < 48) last[1] += " / " + label; else merged.push([x, label]); }
   for (const [x, label] of merged) {
-    const anchor = x > W - P.r - 60 ? "end" : "start", tx = anchor === "end" ? x - 3 : x + 3;
-    g += `<line x1="${x}" x2="${x}" y1="${P.t}" y2="${H - P.b}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="2 3"/><text x="${tx}" y="${P.t - 4}" text-anchor="${anchor}" font-size="10" fill="var(--text-muted)">${esc(label)}</text>`;
+    const anchor = x > W - P.r - 70 ? "end" : "start";
+    g += `<line x1="${x}" x2="${x}" y1="${P.t}" y2="${H - P.b}" stroke="var(--ink-3)" stroke-dasharray="2 3"/><text x="${anchor === "end" ? x - 4 : x + 4}" y="${P.t - 5}" text-anchor="${anchor}" font-size="11" fill="var(--ink-3)">${esc(label)}</text>`;
   }
-  const line = pts.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(p.c).toFixed(1)}`).join("");
-  g += `<path d="${line}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-  g += `<text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--text-muted)">${esc(dt(pts[0].t))}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--text-muted)">${esc(dt(pts[pts.length - 1].t))}</text>`;
-  g += `<line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--text-muted)" style="display:none"/><circle id="xd" r="4" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2" style="display:none"/>`;
-  g += `<rect id="hit" x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent"/>`;
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
-  const tip = document.getElementById("tip"), hit = document.getElementById("hit");
+  g += `<path d="${pts.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(p.c).toFixed(1)}`).join("")}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  g += `<text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--ink-3)">${esc(dt(pts[0].t))}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--ink-3)">${esc(dt(pts[pts.length - 1].t))}</text>`;
+  g += `<line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--ink-3)" style="display:none"/><circle id="xd" r="4" fill="var(--accent)" stroke="var(--panel)" stroke-width="2" style="display:none"/><rect id="hit" x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent"/>`;
+  svg.innerHTML = g;
+  const tip = $("tip"), hit = $("hit");
   const move = (ev) => {
     const r = svg.getBoundingClientRect(), cx = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
     let i = 0; for (let k = 1; k < xs.length; k++) if (Math.abs(X(xs[k]) - cx) < Math.abs(X(xs[i]) - cx)) i = k;
     const x = X(xs[i]), y = Y(pts[i].c);
-    const xh = document.getElementById("xh"), xd = document.getElementById("xd");
-    xh.setAttribute("x1", x); xh.setAttribute("x2", x); xh.style.display = ""; xd.setAttribute("cx", x); xd.setAttribute("cy", y); xd.style.display = "";
-    tip.innerHTML = `<div class="sub">${esc(dt(pts[i].t))}</div><b>${fmt(pts[i].c, 5)}</b> <span class="sub">H ${fmt(pts[i].h, 5)} L ${fmt(pts[i].l, 5)}</span>`;
+    $("xh").setAttribute("x1", x); $("xh").setAttribute("x2", x); $("xh").style.display = ""; $("xd").setAttribute("cx", x); $("xd").setAttribute("cy", y); $("xd").style.display = "";
+    tip.innerHTML = `<div class="muted">${esc(dt(pts[i].t))}</div><b class="num">${fmt(pts[i].c, 5)}</b> <span class="muted num">H ${fmt(pts[i].h, 5)} · L ${fmt(pts[i].l, 5)}</span>`;
     tip.style.display = "block"; const tw = tip.offsetWidth; tip.style.left = Math.min(Math.max(x - tw / 2, 0), r.width - tw) + "px"; tip.style.top = "0px";
   };
-  const leave = () => { tip.style.display = "none"; document.getElementById("xh").style.display = "none"; document.getElementById("xd").style.display = "none"; };
+  const leave = () => { tip.style.display = "none"; $("xh").style.display = "none"; $("xd").style.display = "none"; };
   hit.addEventListener("mousemove", move); hit.addEventListener("touchstart", move, {passive: true}); hit.addEventListener("touchmove", move, {passive: true});
   hit.addEventListener("mouseleave", leave); hit.addEventListener("touchend", leave);
 }
 
-// ------------------------------------------------------------------ routing
-const m = location.pathname.match(/^\/history\/([^/]+)$/);
-if (m) renderDetail(decodeURIComponent(m[1])); else renderList(true);
+// ------------------------------------------------------------------ boot
+(async () => {
+  await loadList(true);
+  const id = pathId();
+  if (id) select(id, false);
+  else if (isDesktop() && state.items.length) {
+    history.replaceState({}, "", `/history/${state.items[0].id}`);
+    select(state.items[0].id, false);
+  } else select(null, false);
+})();
 </script>
-<style>.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }</style>
 </body>
 </html>
