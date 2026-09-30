@@ -10,6 +10,8 @@ Run with ``uvicorn app.api.main:app --host 0.0.0.0 --port 8000``.
 from __future__ import annotations
 
 import secrets
+from bisect import bisect_left
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,6 +23,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
+from app.api import history
 from app.config.settings import Settings, get_settings
 from app.db.control import get_all_controls, set_control
 from app.db.enums import ControlKey
@@ -103,6 +106,101 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @app.get("/", include_in_schema=False)
     async def dashboard(_: str = Depends(require_auth)) -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/history", include_in_schema=False)
+    @app.get("/history/{item_id}", include_in_schema=False)
+    async def history_page(item_id: str | None = None, _: str = Depends(require_auth)) -> FileResponse:
+        return FileResponse(STATIC_DIR / "history.html", headers={"Cache-Control": "no-store"})
+
+    # ------------------------------------------------------------------ history
+
+    @app.get("/api/history")
+    async def get_history(
+        filter: str = Query("all", pattern="^(all|traded|stopped)$"),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        _: str = Depends(require_auth),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        async with database.session() as s:
+            chains = await history.load_chains(s, settings.experiment_name)
+            decided = [c.request.candle_time + history.DECISION_BAR for c in chains if c.request is not None]
+            bars = (
+                await history.load_bars(s, settings.instrument, min(decided), max(decided) + history.HYPOTHETICAL_HORIZON)
+                if decided
+                else []
+            )
+        bar_times = [b.time for b in bars]
+        items = []
+        for c in chains:
+            hypo = None
+            if c.request is not None and c.trade is None and c.request.trade_plan:
+                start = c.request.candle_time + history.DECISION_BAR
+                hypo = history.hypothetical_outcome(c.request.trade_plan, start, bars[bisect_left(bar_times, start):])
+            items.append(history.item_summary(c, hypo))
+        items.sort(key=lambda i: i["time"] or "", reverse=True)
+
+        stopped = [i for i in items if i["category"] == "STOPPED"]
+        summary = {
+            "taken": sum(1 for i in items if i["category"] == "TRADED"),
+            "won": sum(1 for i in items if i["outcome"] == "WON"),
+            "lost": sum(1 for i in items if i["outcome"] == "LOST"),
+            "open": sum(1 for i in items if i["outcome"] == "OPEN"),
+            "stopped": len(stopped),
+            "stopped_would_win": sum(1 for i in stopped if (i["hypothetical"] or {}).get("result") == "WOULD_WIN"),
+            "stopped_would_lose": sum(1 for i in stopped if (i["hypothetical"] or {}).get("result") == "WOULD_LOSE"),
+            "stopped_by": dict(Counter(i["outcome"] for i in stopped)),
+        }
+        if filter == "traded":
+            items = [i for i in items if i["category"] == "TRADED"]
+        elif filter == "stopped":
+            items = stopped
+        return {"summary": summary, "total": len(items), "items": items[offset : offset + limit]}
+
+    @app.get("/api/history/{item_id}")
+    async def get_history_item(
+        item_id: str, _: str = Depends(require_auth), database: Database = Depends(get_db)
+    ) -> dict[str, Any]:
+        async with database.session() as s:
+            chain = await history.load_chain(s, item_id)
+            if chain is None:
+                raise HTTPException(404, "not found")
+            req, t = chain.request, chain.trade
+            start = (req.candle_time + history.DECISION_BAR) if req else t.open_time  # type: ignore[union-attr]
+            end = start + history.HYPOTHETICAL_HORIZON
+            if t is not None and t.close_time is not None:
+                end = t.close_time
+            elif t is not None:
+                end = utcnow()
+            bars = await history.load_bars(s, settings.instrument, start - timedelta(hours=3), end + timedelta(hours=2))
+        hypo = None
+        if req is not None and t is None and req.trade_plan:
+            hypo = history.hypothetical_outcome(req.trade_plan, start, [b for b in bars if b.time >= start])
+            if hypo and hypo.get("resolved_at"):
+                cut = datetime.fromisoformat(hypo["resolved_at"]) + timedelta(hours=2)
+                bars = [b for b in bars if b.time <= cut]
+        plan = (req.trade_plan if req else None) or {}
+        levels = {
+            "entry": (t.open_price if t else plan.get("entry")),
+            "stop_loss": (t.stop_loss if t and t.stop_loss else plan.get("stop_loss")),
+            "take_profit": (t.take_profit if t and t.take_profit else plan.get("take_profit")),
+            "exit": t.close_price if t else None,
+        }
+        markers = {
+            "decision": start.isoformat(),
+            "open": t.open_time.isoformat() if t else None,
+            "close": t.close_time.isoformat() if t and t.close_time else None,
+            "hypothetical_resolved": (hypo or {}).get("resolved_at"),
+        }
+        return _jsonable(
+            {
+                "item": history.item_summary(chain, hypo),
+                "timeline": history.build_timeline(chain, hypo),
+                "price_path": [{"t": b.time.isoformat(), "h": b.high, "l": b.low, "c": b.close} for b in bars[-400:]],
+                "levels": levels,
+                "markers": markers,
+            }
+        )
 
     # ------------------------------------------------------------------ status
 

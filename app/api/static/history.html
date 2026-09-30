@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Trade History</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f3f0;
+  --surface-1: #fcfcfb;
+  --border: #e2e0da;
+  --grid: #dcdad3;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77766f;
+  --series-1: #2a78d6;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --neutral: #8f8e86;
+  --good-ink: #006300;
+  --critical-ink: #b42323;
+  --warn-ink: #8a5a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --border: #2d2d2b;
+    --grid: #3a3a37;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e86;
+    --series-1: #3987e5;
+    --good-ink: #4cc94c;
+    --critical-ink: #ff8a8a;
+    --warn-ink: #fab219;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #111110;
+  --surface-1: #1a1a19;
+  --border: #2d2d2b;
+  --grid: #3a3a37;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e86;
+  --series-1: #3987e5;
+  --good-ink: #4cc94c;
+  --critical-ink: #ff8a8a;
+  --warn-ink: #fab219;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--surface-0); color: var(--text-primary); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+main { max-width: 860px; margin: 0 auto; padding: 16px 16px 56px; }
+a { color: var(--series-1); text-decoration: none; font-weight: 600; }
+h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin: 18px 0 8px; }
+.top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.sub { color: var(--text-muted); font-size: 13px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; min-width: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.chip { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; min-width: 0; }
+.chip b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.chip span { font-size: 12px; color: var(--text-secondary); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 12px; }
+.seg button { font: inherit; font-size: 14px; font-weight: 600; border: 0; background: var(--surface-1); color: var(--text-secondary); padding: 10px 14px; min-height: 44px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); }
+.day { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 6px; }
+.item { display: block; color: inherit; font-weight: normal; background: var(--surface-1); border: 1px solid var(--border); border-left: 4px solid var(--neutral); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.item:active { opacity: .8; }
+.item .row1 { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.item .meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; overflow-wrap: break-word; }
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.k-good { color: var(--good-ink); } .k-bad { color: var(--critical-ink); } .k-warn { color: var(--warn-ink); } .k-neutral { color: var(--text-secondary); }
+.b-good { border-left-color: var(--good); } .b-bad { border-left-color: var(--critical); } .b-warn { border-left-color: var(--warning); } .b-neutral { border-left-color: var(--neutral); }
+.hypo { font-size: 12px; margin-top: 4px; }
+button.more { font: inherit; font-weight: 600; width: 100%; min-height: 44px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
+/* ---- timeline tree ---- */
+.tree { list-style: none; margin: 0; padding: 0; }
+.tree > li { position: relative; padding: 0 0 18px 34px; }
+.tree > li::before { content: ""; position: absolute; left: 11px; top: 26px; bottom: 0; width: 2px; background: var(--grid); }
+.tree > li:last-child::before { display: none; }
+.tree > li.after-stop::before, .tree > li.hypothetical::before { background: repeating-linear-gradient(var(--grid) 0 4px, transparent 4px 8px); }
+.dot { position: absolute; left: 0; top: 0; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff; background: var(--neutral); }
+.s-pass .dot, .s-win .dot { background: var(--good); }
+.s-fail .dot, .s-loss .dot { background: var(--critical); }
+.s-pending .dot, .s-warn .dot { background: var(--warning); color: #0b0b0b; }
+.s-info .dot { background: var(--surface-1); color: var(--text-secondary); border: 2px solid var(--grid); }
+.hypothetical .dot { border-style: dashed; }
+.ntitle { font-weight: 700; }
+.ntime { font-size: 12px; color: var(--text-muted); }
+.nsum { font-size: 14px; color: var(--text-secondary); overflow-wrap: break-word; }
+.stop { display: inline-block; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--critical-ink); border: 1px solid var(--critical); border-radius: 999px; padding: 1px 8px; }
+dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 6px 0 0; font-size: 13px; }
+dl.kv dt { color: var(--text-muted); } dl.kv dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.children { list-style: none; margin: 8px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--grid); }
+.children li { position: relative; padding: 3px 0 3px 14px; font-size: 13px; }
+.children li::before { content: ""; position: absolute; left: -2px; top: 13px; width: 10px; border-top: 2px solid var(--grid); }
+.children .ci { font-weight: 700; margin-right: 4px; }
+.children .cd { color: var(--text-muted); overflow-wrap: break-word; }
+details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; margin-top: 6px; }
+.raw { white-space: pre-wrap; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-0); border-radius: 8px; padding: 10px; max-height: 360px; overflow: auto; overflow-wrap: anywhere; }
+/* ---- chart ---- */
+.chart-wrap { position: relative; }
+svg.chart { width: 100%; height: 240px; display: block; touch-action: pan-y; }
+.tooltip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12); white-space: nowrap; display: none; }
+.linkish { background: none; border: none; padding: 0; color: var(--series-1); font: inherit; font-weight: 600; font-size: 13px; cursor: pointer; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--grid); }
+.scroll { overflow-x: auto; }
+.empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+<main id="app"><p class="sub">Loading…</p></main>
+<script>
+const app = document.getElementById("app");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (n, d = 2) => n === null || n === undefined || Number.isNaN(Number(n)) ? "–" : Number(n).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const dt = (iso) => iso ? new Date(iso).toLocaleString(undefined, {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
+const tm = (iso) => iso ? new Date(iso).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"}) : "";
+const day = (iso) => iso ? new Date(iso).toLocaleDateString(undefined, {weekday: "short", month: "short", day: "numeric"}) : "Unknown";
+const pretty = (code) => String(code || "").replace(/_/g, " ").toLowerCase();
+
+async function api(path) {
+  const r = await fetch(path, {credentials: "same-origin", headers: {"X-Requested-With": "tradlysis"}});
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+// Outcome -> [tone, icon]; icons + text so meaning never relies on color alone.
+function tone(item) {
+  const o = item.outcome;
+  if (o === "WON") return ["good", "▲"];
+  if (o === "LOST") return ["bad", "▼"];
+  if (o === "OPEN" || o === "ORDER_PENDING" || o === "FILLED_AWAITING_SYNC") return ["warn", "◷"];
+  if (o === "EXTERNAL") return ["warn", "!"];
+  if (item.category === "STOPPED") return ["neutral", "■"];
+  return ["neutral", "•"];
+}
+function hypoLine(h) {
+  if (!h) return "";
+  const cls = h.result === "WOULD_WIN" ? "k-good" : h.result === "WOULD_LOSE" ? "k-bad" : "k-neutral";
+  const icon = h.result === "WOULD_WIN" ? "▲" : h.result === "WOULD_LOSE" ? "▼" : "…";
+  return `<div class="hypo ${cls}">↳ ${icon} ${esc(h.label)}</div>`;
+}
+
+// ------------------------------------------------------------------ list view
+let listState = {filter: "all", offset: 0, items: [], total: 0, summary: null};
+
+async function renderList(reset = true) {
+  if (reset) { listState.offset = 0; listState.items = []; }
+  const q = `/api/history?filter=${listState.filter}&limit=50&offset=${listState.offset}`;
+  let data;
+  try { data = await api(q); } catch (e) { app.innerHTML = `<p class="k-bad">Could not load history: ${esc(e.message)}</p>`; return; }
+  listState.items = listState.items.concat(data.items); listState.total = data.total; listState.summary = data.summary;
+  const s = data.summary;
+  const chip = (v, label, cls = "") => `<div class="chip"><b class="${cls}">${v}</b><span>${label}</span></div>`;
+  let html = `<div class="top"><a href="/">← Dashboard</a><h1>History</h1></div>
+    <p class="sub" style="margin-top:-6px">Every trade taken and every setup that was stopped. Tap one to see its timeline.</p>
+    <div class="chips">
+      ${chip(s.taken, "trades taken")}${chip(`${s.won} / ${s.lost}`, "won / lost")}${chip(s.open, "open")}
+      ${chip(s.stopped, "setups stopped")}
+      ${chip(`<span class="k-good">▲${s.stopped_would_win}</span> <span class="k-bad">▼${s.stopped_would_lose}</span>`, "stopped: would have won / lost")}
+    </div>
+    <div class="seg" role="group" aria-label="Filter">
+      ${["all", "traded", "stopped"].map(f => `<button data-f="${f}" aria-pressed="${listState.filter === f}">${{all: "All", traded: "Taken", stopped: "Stopped"}[f]}</button>`).join("")}
+    </div><div id="list">`;
+  if (!listState.items.length) html += `<div class="empty">Nothing here yet. Setups appear once the engine finds them.</div>`;
+  let lastDay = null;
+  for (const it of listState.items) {
+    const d = day(it.time);
+    if (d !== lastDay) { html += `<div class="day">${esc(d)}</div>`; lastDay = d; }
+    const [t, icon] = tone(it);
+    const kcls = {good: "k-good", bad: "k-bad", warn: "k-warn", neutral: "k-neutral"}[t];
+    const bcls = {good: "b-good", bad: "b-bad", warn: "b-warn", neutral: "b-neutral"}[t];
+    const detail = it.category === "TRADED"
+      ? [it.pl != null ? `P/L ${fmt(it.pl)}` : null, it.confidence != null ? `confidence ${fmt(it.confidence)}` : null].filter(Boolean).join(" · ")
+      : (it.reasons || []).map(pretty).join(", ");
+    const ctx = [it.regime ? pretty(it.regime) : null, it.news_risk ? `news ${it.news_risk}` : null, it.risk_reward ? `1:${it.risk_reward}` : null].filter(Boolean).join(" · ");
+    html += `<a class="item ${bcls}" href="/history/${esc(it.id)}">
+      <div class="row1"><span><b>${esc(tm(it.time))}</b> · ${esc(it.direction || "–")} EUR/USD</span><span class="badge ${kcls}">${icon} ${esc(it.label)}</span></div>
+      ${detail ? `<div class="meta">${esc(detail)}</div>` : ""}
+      ${ctx ? `<div class="meta">${esc(ctx)}</div>` : ""}
+      ${hypoLine(it.hypothetical)}
+    </a>`;
+  }
+  html += `</div>`;
+  if (listState.items.length < listState.total) html += `<button class="more" id="more">Load more (${listState.total - listState.items.length})</button>`;
+  app.innerHTML = html;
+  app.querySelectorAll(".seg button").forEach(b => b.onclick = () => { listState.filter = b.dataset.f; renderList(true); });
+  const more = document.getElementById("more");
+  if (more) more.onclick = () => { listState.offset += 50; renderList(false); };
+}
+
+// ------------------------------------------------------------------ detail view
+const NODE_ICON = {pass: "✓", fail: "✗", info: "•", pending: "◷", win: "▲", loss: "▼", warn: "!"};
+
+function childList(children) {
+  if (!children.length) return "";
+  const failed = children.filter(c => c.status === "fail");
+  const rows = (list) => `<ul class="children">${list.map(c => `<li><span class="ci ${c.status === "pass" ? "k-good" : c.status === "fail" ? "k-bad" : "k-neutral"}">${NODE_ICON[c.status] || "•"}</span>${esc(c.title)} <span class="cd">${esc(c.summary)}</span></li>`).join("")}</ul>`;
+  if (children.length <= 7) return rows(children);
+  const head = failed.length ? rows(failed) : "";
+  return `${head}<details><summary>Show all ${children.length}</summary>${rows(children)}</details>`;
+}
+
+function nodeHtml(n, afterStop) {
+  const kv = n.details.length ? `<dl class="kv">${n.details.map(d => `<dt>${esc(d.label)}</dt><dd>${esc(d.value)}</dd>`).join("")}</dl>` : "";
+  const raw = n.raw ? `<details><summary>Raw data</summary><div class="raw">${esc(JSON.stringify(n.raw, null, 2))}</div></details>` : "";
+  const cls = [`s-${n.status}`, afterStop ? "after-stop" : "", n.key === "hypothetical" ? "hypothetical" : ""].join(" ");
+  return `<li class="${cls}"><span class="dot" aria-hidden="true">${NODE_ICON[n.status] || "•"}</span>
+    <div class="ntitle">${esc(n.title)} <span class="sr">(${esc(n.status)})</span></div>
+    ${n.time ? `<div class="ntime">${esc(dt(n.time))}</div>` : ""}
+    ${n.summary ? `<div class="nsum">${esc(n.summary)}</div>` : ""}
+    ${n.stopped_here ? `<span class="stop">■ Stopped here</span>` : ""}
+    ${kv}${childList(n.children)}${raw}</li>`;
+}
+
+async function renderDetail(id) {
+  let d;
+  try { d = await api(`/api/history/${encodeURIComponent(id)}`); } catch (e) { app.innerHTML = `<div class="top"><a href="/history">← History</a></div><p class="k-bad">${esc(e.message)}</p>`; return; }
+  const it = d.item; const [t, icon] = tone(it);
+  const kcls = {good: "k-good", bad: "k-bad", warn: "k-warn", neutral: "k-neutral"}[t];
+  // The stopped node's trunk is dashed: anything below it (the "what would have happened" node) did not happen.
+  const nodes = d.timeline.map(n => nodeHtml(n, !!n.stopped_here)).join("");
+  app.innerHTML = `<div class="top"><a href="/history">← History</a></div>
+    <h1>${esc(it.direction || "")} EUR/USD · ${esc(dt(it.time))}</h1>
+    <p class="badge ${kcls}" style="font-size:14px;margin:6px 0 2px">${icon} ${esc(it.label)}</p>
+    ${hypoLine(it.hypothetical)}
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline"><h2 style="margin:0 0 6px">Price (15-minute closes)</h2><button class="linkish" id="tbl">Show table</button></div>
+      <div class="chart-wrap" id="cw"><svg class="chart" id="chart" role="img" aria-label="Price path with entry, stop-loss and take-profit"></svg><div class="tooltip" id="tip"></div></div>
+      <div class="scroll" id="ctable" style="display:none"></div>
+    </div>
+    <h2>Timeline</h2>
+    <div class="card"><ol class="tree">${nodes}</ol></div>`;
+  drawChart(d);
+  window.onresize = () => drawChart(d);
+  document.getElementById("tbl").onclick = () => {
+    const tb = document.getElementById("ctable"), cw = document.getElementById("cw"), show = tb.style.display === "none";
+    tb.style.display = show ? "" : "none"; cw.style.display = show ? "none" : ""; document.getElementById("tbl").textContent = show ? "Show chart" : "Show table";
+    if (show) tb.innerHTML = `<table><thead><tr><th>Time</th><th>High</th><th>Low</th><th>Close</th></tr></thead><tbody>${d.price_path.map(b => `<tr><td>${esc(dt(b.t))}</td><td>${fmt(b.h, 5)}</td><td>${fmt(b.l, 5)}</td><td>${fmt(b.c, 5)}</td></tr>`).join("")}</tbody></table>`;
+    else drawChart(d);
+  };
+}
+
+function drawChart(d) {
+  const svg = document.getElementById("chart"); if (!svg) return;
+  const pts = d.price_path, W = svg.clientWidth || 600, H = 240, P = {l: 8, r: 80, t: 16, b: 22};
+  if (pts.length < 2) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--text-muted)" font-size="13">No candle data for this period</text>`; return; }
+  const L = d.levels, xs = pts.map(p => new Date(p.t).getTime());
+  const vals = pts.flatMap(p => [p.h, p.l]).concat([L.entry, L.stop_loss, L.take_profit, L.exit].filter(v => v != null));
+  let y0 = Math.min(...vals), y1 = Math.max(...vals); const pad = (y1 - y0) * 0.08 || 0.0005; y0 -= pad; y1 += pad;
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  const X = t => P.l + (t - x0) / (x1 - x0 || 1) * (W - P.l - P.r), Y = v => P.t + (1 - (v - y0) / (y1 - y0)) * (H - P.t - P.b);
+  let g = "";
+  // Reference lines, labelled directly at the right edge (text in ink, line carries the colour).
+  const ref = (v, label, color, dash) => { if (v == null) return; const y = Y(v); g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="${color}" stroke-width="1.5" ${dash ? 'stroke-dasharray="5 4"' : ""}/><text x="${W - P.r + 4}" y="${y + 4}" font-size="11" fill="var(--text-secondary)">${label}</text>`; };
+  ref(L.take_profit, `TP ${fmt(L.take_profit, 5)}`, "var(--good)", true);
+  ref(L.stop_loss, `SL ${fmt(L.stop_loss, 5)}`, "var(--critical)", true);
+  ref(L.entry, `In ${fmt(L.entry, 5)}`, "var(--text-muted)", false);
+  // Event markers (decision / open / close / hypothetical resolution).
+  const M = d.markers;
+  // Markers closer than ~48px share one line and a combined label, so labels never collide.
+  const marks = [[M.decision, "decision"], [M.open, "open"], [M.close, "close"], [M.hypothetical_resolved, "hit"]]
+    .filter(([iso]) => iso).map(([iso, label]) => [X(new Date(iso).getTime()), label, new Date(iso).getTime()])
+    .filter(([, , t]) => t >= x0 && t <= x1).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [x, label] of marks) { const last = merged[merged.length - 1]; if (last && x - last[0] < 48) last[1] += " / " + label; else merged.push([x, label]); }
+  for (const [x, label] of merged) {
+    const anchor = x > W - P.r - 60 ? "end" : "start", tx = anchor === "end" ? x - 3 : x + 3;
+    g += `<line x1="${x}" x2="${x}" y1="${P.t}" y2="${H - P.b}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="2 3"/><text x="${tx}" y="${P.t - 4}" text-anchor="${anchor}" font-size="10" fill="var(--text-muted)">${esc(label)}</text>`;
+  }
+  const line = pts.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(p.c).toFixed(1)}`).join("");
+  g += `<path d="${line}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  g += `<text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--text-muted)">${esc(dt(pts[0].t))}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--text-muted)">${esc(dt(pts[pts.length - 1].t))}</text>`;
+  g += `<line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--text-muted)" style="display:none"/><circle id="xd" r="4" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2" style="display:none"/>`;
+  g += `<rect id="hit" x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent"/>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
+  const tip = document.getElementById("tip"), hit = document.getElementById("hit");
+  const move = (ev) => {
+    const r = svg.getBoundingClientRect(), cx = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
+    let i = 0; for (let k = 1; k < xs.length; k++) if (Math.abs(X(xs[k]) - cx) < Math.abs(X(xs[i]) - cx)) i = k;
+    const x = X(xs[i]), y = Y(pts[i].c);
+    const xh = document.getElementById("xh"), xd = document.getElementById("xd");
+    xh.setAttribute("x1", x); xh.setAttribute("x2", x); xh.style.display = ""; xd.setAttribute("cx", x); xd.setAttribute("cy", y); xd.style.display = "";
+    tip.innerHTML = `<div class="sub">${esc(dt(pts[i].t))}</div><b>${fmt(pts[i].c, 5)}</b> <span class="sub">H ${fmt(pts[i].h, 5)} L ${fmt(pts[i].l, 5)}</span>`;
+    tip.style.display = "block"; const tw = tip.offsetWidth; tip.style.left = Math.min(Math.max(x - tw / 2, 0), r.width - tw) + "px"; tip.style.top = "0px";
+  };
+  const leave = () => { tip.style.display = "none"; document.getElementById("xh").style.display = "none"; document.getElementById("xd").style.display = "none"; };
+  hit.addEventListener("mousemove", move); hit.addEventListener("touchstart", move, {passive: true}); hit.addEventListener("touchmove", move, {passive: true});
+  hit.addEventListener("mouseleave", leave); hit.addEventListener("touchend", leave);
+}
+
+// ------------------------------------------------------------------ routing
+const m = location.pathname.match(/^\/history\/([^/]+)$/);
+if (m) renderDetail(decodeURIComponent(m[1])); else renderList(true);
+</script>
+<style>.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }</style>
+</body>
+</html>

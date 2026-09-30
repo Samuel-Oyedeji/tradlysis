@@ -99,6 +99,31 @@ Open `https://<your-host>/` and sign in with `DASHBOARD_USERNAME` / `DASHBOARD_P
   to see the exact snapshot sent to the model, its raw answer and every risk check), the
   experiment summary, the news calendar, central-bank reads and system events.
 
+### History page (`/history`)
+
+Linked from the dashboard header. It lists every trade taken and every setup that was
+stopped, grouped by day.
+- **Filters:** All, Taken, Stopped.
+- **Summary:** trades won and lost, plus how many stopped setups *would have* won or lost.
+
+Tap an item to open its **timeline tree**. The tree follows the chain:
+1. candle close
+2. setup check, with each rule ✓/✗ and the trade plan
+3. market context (timeframes, regime, news)
+4. the model's decision and rationale
+5. risk engine: failed checks first, then all of them
+6. order: fill, slippage
+7. trade opened
+8. broker transactions
+9. close, with R and P/L
+
+A stopped chain is marked **■ Stopped here**. For stopped setups, a final dashed node shows
+**what would have happened**: whether the planned take-profit or stop-loss was hit first in
+the following 5 days. This is estimated from 15-minute mid-price candles, so it ignores spread
+and slippage. Each timeline has a price chart with entry, stop-loss and take-profit lines and
+markers for the decision, open and close. It also has a table view, and raw data can be expanded
+at every step.
+
 The API never talks to the broker. *Close all trades* sets a flag that the engine's
 executor acts on within about 5 seconds, so the executor stays the only component that can
 place orders.

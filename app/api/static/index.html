@@ -110,6 +110,7 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
     <span id="engine" class="pill">…</span>
     <span id="killpill" class="pill" style="display:none"></span>
     <span class="sub" id="updated"></span>
+    <a href="/history" style="margin-left:auto;font-weight:600;color:var(--series-1);text-decoration:none">History →</a>
   </header>
   <div id="banner" class="banner"></div>
 
@@ -314,7 +315,7 @@ async function showDecision(id) {
   const d = await api(`/api/decisions/${id}`);
   const checks = d.risk_check ? d.risk_check.checks.map(c => `<tr><td>${c.passed ? "✓" : "✗"}</td><td>${esc(c.name)}</td><td class="codes">${esc(c.detail)}</td></tr>`).join("") : "";
   $("decision-detail").innerHTML = `<div class="card" style="margin:0">
-    <div style="display:flex;justify-content:space-between"><b>Opportunity #${id}</b><button class="linkish" onclick="document.getElementById('decision-detail').innerHTML=''">Close</button></div>
+    <div style="display:flex;justify-content:space-between;gap:8px"><b>Opportunity #${id}</b><span><a class="linkish" style="text-decoration:none" href="/history/r-${id}">Open timeline →</a> <button class="linkish" onclick="document.getElementById('decision-detail').innerHTML=''">Close</button></span></div>
     ${d.decision ? `<p>Decision <b>${esc(d.decision.decision)}</b> (${esc(d.decision.source)}${d.decision.confidence != null ? ", confidence " + fmt(d.decision.confidence) : ""})${d.decision.validation_error ? `<br><span class="neg">${esc(d.decision.validation_error)}</span>` : ""}</p>` : ""}
     ${checks ? `<h2>Risk checks</h2><div class="scroll"><table><tbody>${checks}</tbody></table></div>` : ""}
     ${d.order ? `<p>Order <b>${esc(d.order.status)}</b> ${esc(d.order.client_order_id)} ${d.order.fill_price ? "@ " + fmt(d.order.fill_price, 5) : ""} ${esc(d.order.reject_reason || "")}</p>` : ""}
