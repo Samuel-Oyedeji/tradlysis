@@ -1,0 +1,65 @@
+# Tradlysis on a single VPS.
+#
+#   cp .env.example .env            # fill in credentials
+#   docker compose build
+#   docker compose run --rm migrate # apply database migrations (you run this yourself)
+#   docker compose up -d engine api analyzer
+#
+# Using your own/managed PostgreSQL: set DATABASE_URL in .env and skip the `db` service.
+# Using the bundled PostgreSQL: `docker compose --profile local-db up -d db` and point
+# DATABASE_URL at postgresql://tradlysis:<POSTGRES_PASSWORD>@db:5432/tradlysis
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  env_file: .env
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  engine:
+    <<: *app
+    command: ["python", "-m", "app.engine"]
+    stop_grace_period: 30s
+
+  api:
+    <<: *app
+    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    # Bound to localhost: put a TLS reverse proxy (Caddy/nginx) in front before exposing it.
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  analyzer:
+    <<: *app
+    command: ["python", "-m", "app.experiments.analyzer"]
+
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/migrate.Dockerfile
+    env_file: .env
+    profiles: ["tools"]
+
+  db:
+    image: postgres:16
+    profiles: ["local-db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tradlysis
+      POSTGRES_DB: tradlysis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+
+volumes:
+  pgdata:

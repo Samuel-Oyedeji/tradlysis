@@ -1,0 +1,426 @@
+// Tradlysis database schema.
+//
+// This file is the single source of truth for the PostgreSQL schema. Migrations in
+// prisma/migrations are generated from it and applied with `npm run migrate:deploy`.
+// The Python engine does not use a Prisma client; it reads and writes through the
+// SQLAlchemy models in app/db/models.py, which must mirror this file
+// (tests/test_schema_sync.py enforces that).
+//
+// Conventions:
+//   * Tables and columns are snake_case (@@map / @map).
+//   * All timestamps are timestamptz and stored in UTC.
+//   * Prices and indicator values are double precision; account money is numeric.
+//   * Status-like fields are plain text; allowed values are defined in app/db/enums.py.
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Market data
+// ---------------------------------------------------------------------------
+
+/// Sampled bid/ask observations from the OANDA pricing stream.
+model MarketPrice {
+  id         BigInt   @id @default(autoincrement())
+  instrument String
+  time       DateTime @db.Timestamptz(6)
+  bid        Float
+  ask        Float
+  mid        Float
+  spreadPips Float    @map("spread_pips")
+  tradeable  Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([instrument, time])
+  @@map("market_prices")
+}
+
+/// OHLC candles (mid prices) per instrument and granularity. `time` is the candle open time.
+model Candle {
+  id          BigInt   @id @default(autoincrement())
+  instrument  String
+  granularity String
+  time        DateTime @db.Timestamptz(6)
+  open        Float
+  high        Float
+  low         Float
+  close       Float
+  bidClose    Float?   @map("bid_close")
+  askClose    Float?   @map("ask_close")
+  volume      Int      @default(0)
+  complete    Boolean  @default(false)
+  source      String   @default("oanda")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([instrument, granularity, time])
+  @@map("candles")
+}
+
+/// Deterministic technical state for one timeframe at one candle close.
+model TechnicalSnapshot {
+  id            BigInt   @id @default(autoincrement())
+  instrument    String
+  timeframe     String
+  candleTime    DateTime @map("candle_time") @db.Timestamptz(6)
+  computedAt    DateTime @default(now()) @map("computed_at") @db.Timestamptz(6)
+  close         Float
+  ema20         Float?
+  ema50         Float?
+  ema200        Float?
+  rsi14         Float?
+  atr14         Float?
+  trend         String
+  structure     String
+  lastSwingHigh Float?   @map("last_swing_high")
+  lastSwingLow  Float?   @map("last_swing_low")
+  details       Json     @default("{}")
+
+  @@unique([instrument, timeframe, candleTime])
+  @@map("technical_snapshots")
+}
+
+/// Support/resistance zones and key levels detected at a point in time.
+model SupportResistance {
+  id         BigInt   @id @default(autoincrement())
+  instrument String
+  computedAt DateTime @map("computed_at") @db.Timestamptz(6)
+  kind       String // SUPPORT | RESISTANCE
+  source     String // SWING_CLUSTER | PREV_DAY_HIGH | PREV_WEEK_LOW | ...
+  timeframe  String?
+  priceLow   Float    @map("price_low")
+  priceHigh  Float    @map("price_high")
+  price      Float
+  touches    Int      @default(1)
+  strength   Float    @default(0)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([instrument, computedAt])
+  @@map("support_resistance")
+}
+
+/// Trend and volatility regime classification per timeframe.
+model MarketRegime {
+  id               BigInt   @id @default(autoincrement())
+  instrument       String
+  timeframe        String
+  computedAt       DateTime @map("computed_at") @db.Timestamptz(6)
+  trendRegime      String   @map("trend_regime")
+  volatilityRegime String   @map("volatility_regime")
+  atr              Float?
+  atrPercentile    Float?   @map("atr_percentile")
+  details          Json     @default("{}")
+
+  @@index([instrument, timeframe, computedAt])
+  @@map("market_regimes")
+}
+
+// ---------------------------------------------------------------------------
+// News / fundamentals
+// ---------------------------------------------------------------------------
+
+/// Scheduled economic calendar events (deterministic facts).
+model NewsEvent {
+  id                BigInt   @id @default(autoincrement())
+  provider          String
+  externalId        String   @map("external_id")
+  title             String
+  currency          String
+  impact            String // LOW | MEDIUM | HIGH | HOLIDAY | UNKNOWN
+  eventTime         DateTime @map("event_time") @db.Timestamptz(6)
+  forecast          String?
+  previous          String?
+  actual            String?
+  forecastValue     Float?   @map("forecast_value")
+  previousValue     Float?   @map("previous_value")
+  actualValue       Float?   @map("actual_value")
+  surprise          Float?
+  surpriseDirection String?  @map("surprise_direction") // ABOVE | BELOW | INLINE
+  raw               Json     @default("{}")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([provider, externalId])
+  @@index([eventTime])
+  @@index([currency, eventTime])
+  @@map("news_events")
+}
+
+/// Qualitative news items (e.g. central-bank press releases) collected for LLM interpretation.
+model NewsArticle {
+  id            BigInt    @id @default(autoincrement())
+  provider      String
+  externalId    String    @map("external_id")
+  currency      String?
+  title         String
+  summary       String?
+  url           String?
+  publishedAt   DateTime? @map("published_at") @db.Timestamptz(6)
+  interpretedAt DateTime? @map("interpreted_at") @db.Timestamptz(6)
+  raw           Json      @default("{}")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  interpretations NewsInterpretation[]
+
+  @@unique([provider, externalId])
+  @@index([publishedAt])
+  @@map("news_articles")
+}
+
+/// LLM interpretation of a news article: a structured currency bias with confidence and reasons.
+model NewsInterpretation {
+  id            BigInt   @id @default(autoincrement())
+  articleId     BigInt?  @map("article_id")
+  currency      String
+  tone          String // HAWKISH | DOVISH | NEUTRAL
+  currencyBias  String   @map("currency_bias") // BULLISH | BEARISH | NEUTRAL
+  confidence    Float
+  reasonCodes   String[] @map("reason_codes")
+  summary       String?
+  model         String
+  promptVersion String   @map("prompt_version")
+  valid         Boolean  @default(true)
+  error         String?
+  rawResponse   Json?    @map("raw_response")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  article NewsArticle? @relation(fields: [articleId], references: [id], onDelete: SetNull)
+
+  @@index([currency, createdAt])
+  @@map("news_interpretations")
+}
+
+// ---------------------------------------------------------------------------
+// Decision pipeline: request -> decision -> risk check -> order -> trade
+// ---------------------------------------------------------------------------
+
+/// One row per decision opportunity: exactly what the decision layer saw.
+model DecisionRequest {
+  id             BigInt   @id @default(autoincrement())
+  experiment     String
+  instrument     String
+  candleTime     DateTime @map("candle_time") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  snapshot       Json
+  tradePlan      Json?    @map("trade_plan")
+  strategyResult Json     @default("{}") @map("strategy_result")
+  llmCalled      Boolean  @default(false) @map("llm_called")
+  model          String?
+  promptVersion  String?  @map("prompt_version")
+  messages       Json?
+
+  decision  Decision?
+  riskCheck RiskCheck?
+
+  @@unique([experiment, instrument, candleTime])
+  @@index([createdAt])
+  @@map("decision_requests")
+}
+
+/// The (schema-validated) decision for a request. WAIT decisions are recorded too.
+model Decision {
+  id               BigInt   @id @default(autoincrement())
+  requestId        BigInt   @unique @map("request_id")
+  source           String // LLM | PREFILTER | ERROR
+  decision         String // BUY | SELL | WAIT
+  setup            String?
+  confidence       Float?
+  reasonCodes      String[] @map("reason_codes")
+  valid            Boolean  @default(true)
+  validationError  String?  @map("validation_error")
+  rawResponse      Json?    @map("raw_response")
+  latencyMs        Int?     @map("latency_ms")
+  promptTokens     Int?     @map("prompt_tokens")
+  completionTokens Int?     @map("completion_tokens")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  request   DecisionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  riskCheck RiskCheck?
+
+  @@index([createdAt])
+  @@map("decisions")
+}
+
+/// Deterministic risk-engine evaluation of a BUY/SELL proposal. Every individual check is stored.
+model RiskCheck {
+  id               BigInt   @id @default(autoincrement())
+  requestId        BigInt   @unique @map("request_id")
+  decisionId       BigInt   @unique @map("decision_id")
+  approved         Boolean
+  checks           Json
+  rejectionReasons String[] @map("rejection_reasons")
+  direction        String?
+  units            Int?
+  riskAmount       Decimal? @map("risk_amount") @db.Decimal(20, 6)
+  riskPct          Float?   @map("risk_pct")
+  entryPrice       Float?   @map("entry_price")
+  stopLoss         Float?   @map("stop_loss")
+  takeProfit       Float?   @map("take_profit")
+  riskReward       Float?   @map("risk_reward")
+  accountNav       Decimal? @map("account_nav") @db.Decimal(20, 6)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  request  DecisionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  decision Decision        @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  order    Order?
+
+  @@index([createdAt])
+  @@map("risk_checks")
+}
+
+/// An order instruction sent (or about to be sent) to the broker. client_order_id makes submission idempotent.
+model Order {
+  id                BigInt    @id @default(autoincrement())
+  clientOrderId     String    @unique @map("client_order_id")
+  riskCheckId       BigInt?   @unique @map("risk_check_id")
+  purpose           String    @default("ENTRY") // ENTRY | CLOSE
+  instrument        String
+  direction         String // BUY | SELL
+  units             Int // signed: positive = buy, negative = sell
+  orderType         String    @default("MARKET") @map("order_type")
+  requestedPrice    Float?    @map("requested_price")
+  priceBound        Float?    @map("price_bound")
+  stopLoss          Float?    @map("stop_loss")
+  takeProfit        Float?    @map("take_profit")
+  status            String // PENDING_SUBMIT | SUBMITTED | FILLED | REJECTED | CANCELLED | UNKNOWN | FAILED
+  brokerOrderId     String?   @map("broker_order_id")
+  fillTransactionId String?   @map("fill_transaction_id")
+  brokerTradeId     String?   @map("broker_trade_id")
+  fillPrice         Float?    @map("fill_price")
+  filledUnits       Int?      @map("filled_units")
+  rejectReason      String?   @map("reject_reason")
+  requestPayload    Json      @map("request_payload")
+  responsePayload   Json?     @map("response_payload")
+  httpStatus        Int?      @map("http_status")
+  attempts          Int       @default(0)
+  submittedAt       DateTime? @map("submitted_at") @db.Timestamptz(6)
+  filledAt          DateTime? @map("filled_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  riskCheck RiskCheck? @relation(fields: [riskCheckId], references: [id], onDelete: SetNull)
+  trades    Trade[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+/// A broker trade (position lifecycle). Mirrors OANDA state; OANDA is the source of truth.
+model Trade {
+  id               BigInt    @id @default(autoincrement())
+  brokerTradeId    String    @unique @map("broker_trade_id")
+  orderId          BigInt?   @map("order_id")
+  clientTradeId    String?   @map("client_trade_id")
+  experiment       String?
+  instrument       String
+  direction        String
+  initialUnits     Int       @map("initial_units")
+  currentUnits     Int       @map("current_units")
+  openPrice        Float     @map("open_price")
+  openTime         DateTime  @map("open_time") @db.Timestamptz(6)
+  stopLoss         Float?    @map("stop_loss")
+  takeProfit       Float?    @map("take_profit")
+  initialRiskPrice Float?    @map("initial_risk_price")
+  state            String // OPEN | CLOSED
+  closePrice       Float?    @map("close_price")
+  closeTime        DateTime? @map("close_time") @db.Timestamptz(6)
+  closeReason      String?   @map("close_reason")
+  realizedPl       Decimal?  @map("realized_pl") @db.Decimal(20, 6)
+  unrealizedPl     Decimal?  @map("unrealized_pl") @db.Decimal(20, 6)
+  financing        Decimal?  @db.Decimal(20, 6)
+  rMultiple        Float?    @map("r_multiple")
+  unexpected       Boolean   @default(false)
+  raw              Json      @default("{}")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([state])
+  @@index([openTime])
+  @@map("trades")
+}
+
+/// Raw broker transactions, keyed by the OANDA transaction ID.
+model BrokerTransaction {
+  id            BigInt   @id @default(autoincrement())
+  transactionId String   @unique @map("transaction_id")
+  accountId     String   @map("account_id")
+  type          String
+  time          DateTime @db.Timestamptz(6)
+  orderId       String?  @map("order_id")
+  tradeId       String?  @map("trade_id")
+  clientOrderId String?  @map("client_order_id")
+  reason        String?
+  pl            Decimal? @db.Decimal(20, 6)
+  raw           Json
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([time])
+  @@map("broker_transactions")
+}
+
+/// Periodic snapshots of broker account state.
+model AccountSnapshot {
+  id                BigInt   @id @default(autoincrement())
+  takenAt           DateTime @map("taken_at") @db.Timestamptz(6)
+  accountId         String   @map("account_id")
+  currency          String
+  balance           Decimal  @db.Decimal(20, 6)
+  nav               Decimal  @db.Decimal(20, 6)
+  unrealizedPl      Decimal  @map("unrealized_pl") @db.Decimal(20, 6)
+  marginUsed        Decimal  @map("margin_used") @db.Decimal(20, 6)
+  marginAvailable   Decimal  @map("margin_available") @db.Decimal(20, 6)
+  openTradeCount    Int      @map("open_trade_count")
+  openPositionCount Int      @map("open_position_count")
+  pendingOrderCount Int      @map("pending_order_count")
+  lastTransactionId String?  @map("last_transaction_id")
+  raw               Json     @default("{}")
+
+  @@index([takenAt])
+  @@map("account_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
+
+/// Operational log: stream disconnects, stale prices, broker errors, breaker trips, etc.
+model SystemEvent {
+  id        BigInt   @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  level     String // INFO | WARNING | ERROR | CRITICAL
+  component String
+  eventType String   @map("event_type")
+  message   String
+  details   Json     @default("{}")
+
+  @@index([createdAt])
+  @@index([eventType, createdAt])
+  @@map("system_events")
+}
+
+/// Persistent control flags shared between the engine and the API (kill switch, breakers, heartbeat).
+model ControlState {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  updatedBy String?  @map("updated_by")
+
+  @@map("control_state")
+}
+
+/// Output of the experiment analyzer (separate process, never trades).
+model AnalysisReport {
+  id          BigInt    @id @default(autoincrement())
+  experiment  String
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  periodStart DateTime? @map("period_start") @db.Timestamptz(6)
+  periodEnd   DateTime  @map("period_end") @db.Timestamptz(6)
+  metrics     Json
+
+  @@index([experiment, createdAt])
+  @@map("analysis_reports")
+}

@@ -1,0 +1,16 @@
+{
+  "name": "tradlysis-db",
+  "private": true,
+  "description": "Prisma schema and migrations for the Tradlysis trading engine (the engine itself is Python).",
+  "scripts": {
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:status": "prisma migrate status",
+    "migrate:dev": "prisma migrate dev",
+    "prisma:validate": "prisma validate",
+    "prisma:format": "prisma format"
+  },
+  "devDependencies": {
+    "dotenv": "^16.6.1",
+    "prisma": "7.10.0"
+  }
+}
