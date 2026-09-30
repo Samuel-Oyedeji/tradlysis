@@ -27,7 +27,7 @@ def utcnow() -> datetime:
 
 
 def parse_time(value: str) -> datetime:
-    """Parse OANDA RFC3339 timestamps (which may carry nanoseconds) into aware UTC datetimes."""
+    """Parse ISO/RFC3339 timestamps into aware UTC datetimes (naive values are taken as UTC)."""
     value = value.strip()
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"

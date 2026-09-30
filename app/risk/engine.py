@@ -17,7 +17,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from app.broker.oanda import InstrumentInfo
+from app.broker.types import InstrumentInfo
 from app.config.settings import Settings
 from app.db.enums import Direction
 from app.strategy.trend_pullback import TradePlan

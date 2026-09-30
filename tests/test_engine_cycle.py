@@ -10,7 +10,6 @@ import pytest
 from sqlalchemy import func, select
 
 from app.alerts.telegram import TelegramSender
-from app.broker.oanda import OandaClient
 from app.db.models import Decision, DecisionRequest, Order, RiskCheck, TechnicalSnapshot, Trade
 from app.decision.openrouter import OpenRouterClient
 from app.engine import TradingEngine
@@ -20,7 +19,7 @@ from app.news.providers.base import CalendarEvent
 from app.strategy import trend_pullback
 from app.technicals.regime import MarketRegimeLabel
 from tests.conftest import make_settings, trend_bars
-from tests.fake_broker import ACCOUNT_ID, FakeBroker
+from tests.fake_broker import FakeBroker, make_client
 from tests.helpers import long_state
 
 BUY = {"decision": "BUY", "setup": "TREND_PULLBACK", "confidence": 0.8,
@@ -41,6 +40,7 @@ class FakeCalendar:
 def market_always_open(monkeypatch):
     monkeypatch.setattr("app.engine.is_fx_market_open", lambda _now: True)
     monkeypatch.setattr("app.execution.executor.LOOKUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr("app.execution.executor.CONFIRM_DELAY_SECONDS", 0)
 
 
 def llm_client(payload, calls):
@@ -53,8 +53,7 @@ def llm_client(payload, calls):
 
 async def make_engine(db, broker, llm, calendar=None, **settings_kw) -> TradingEngine:
     settings = make_settings(database_url=db.engine.url.render_as_string(hide_password=False), **settings_kw)
-    client = OandaClient("https://api.test", "https://stream.test", "tok", ACCOUNT_ID,
-                         transport=broker.transport(), max_get_retries=0)
+    client = make_client(broker)
     engine = TradingEngine(settings, db=db, client=client, llm=llm, calendar=calendar or FakeCalendar(), feeds=[],
                            telegram=TelegramSender("", ""))
     await engine.setup()
@@ -128,7 +127,7 @@ async def test_candidate_confirmed_approved_and_executed(db, monkeypatch):
         rc = await s.scalar(select(RiskCheck))
         order = await s.scalar(select(Order))
         trade = await s.scalar(select(Trade))
-    assert req.llm_called and req.model == "typesafe/jev-1.13" and req.prompt_version == "decision-v1"
+    assert req.llm_called and req.model == "typesafe/jev-1.13" and req.prompt_version == "decision-v2"
     assert req.messages[0]["role"] == "system"
     assert rc.approved and rc.units > 0 and rc.risk_pct == pytest.approx(0.25, abs=0.01)
     assert order.status == "FILLED" and order.units == rc.units

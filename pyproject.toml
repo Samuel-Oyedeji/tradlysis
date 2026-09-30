@@ -1,13 +1,14 @@
 [project]
 name = "tradlysis"
 version = "0.1.0"
-description = "AI-assisted systematic FX trading bot (V1: EUR/USD trend pullback on an OANDA practice account)"
+description = "AI-assisted systematic FX/CFD trading bot (V1: EUR/USD trend pullback on a Capital.com demo account)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",
+    "websockets>=13",
     "pydantic>=2.8",
     "pydantic-settings>=2.7",
     "sqlalchemy[asyncio]>=2.0.30",

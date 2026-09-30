@@ -4,7 +4,7 @@ All settings come from environment variables (or a local ``.env`` file). Credent
 never hard-coded; see ``.env.example`` for the full list.
 
 Safety defaults:
-  * ``TRADING_MODE`` defaults to ``demo`` and always talks to OANDA's practice hosts.
+  * ``TRADING_MODE`` defaults to ``demo`` and always talks to Capital.com's demo API host.
   * ``live`` mode additionally requires ``LIVE_TRADING_CONFIRM`` to equal
     :data:`LIVE_CONFIRM_PHRASE` and separate live credentials.
   * Risk parameters have hard ceilings that configuration cannot exceed.
@@ -28,15 +28,9 @@ HARD_MAX_TOTAL_RISK_PCT = 2.0
 HARD_MAX_DAILY_LOSS_PCT = 5.0
 HARD_MAX_DRAWDOWN_PCT = 20.0
 
-OANDA_HOSTS = {
-    "demo": {
-        "rest": "https://api-fxpractice.oanda.com",
-        "stream": "https://stream-fxpractice.oanda.com",
-    },
-    "live": {
-        "rest": "https://api-fxtrade.oanda.com",
-        "stream": "https://stream-fxtrade.oanda.com",
-    },
+CAPITAL_HOSTS = {
+    "demo": "https://demo-api-capital.backend-capital.com",
+    "live": "https://api-capital.backend-capital.com",
 }
 
 
@@ -62,12 +56,21 @@ class Settings(BaseSettings):
     # (control_state) and can be toggled from the dashboard.
     trading_enabled: bool = True
 
-    # --- OANDA -----------------------------------------------------------------------
-    oanda_practice_api_token: str = ""
-    oanda_practice_account_id: str = ""
-    oanda_live_api_token: str = ""
-    oanda_live_account_id: str = ""
-    oanda_request_timeout_seconds: float = 15.0
+    # --- Broker: Capital.com ------------------------------------------------------------
+    # API key, the login e-mail and the custom password set when the API key was generated.
+    capital_demo_api_key: str = ""
+    capital_demo_identifier: str = ""
+    capital_demo_api_password: str = ""
+    capital_demo_account_id: str = ""  # optional: defaults to the login's active account
+    capital_live_api_key: str = ""
+    capital_live_identifier: str = ""
+    capital_live_api_password: str = ""
+    capital_live_account_id: str = ""
+    # Capital.com market identifier; defaults to INSTRUMENT without the underscore (EURUSD).
+    capital_epic: str = ""
+    # Optional override; by default the streaming host returned at login is used.
+    capital_stream_url: str = ""
+    capital_request_timeout_seconds: float = 15.0
 
     # --- Database --------------------------------------------------------------------
     database_url: str = ""
@@ -187,7 +190,7 @@ class Settings(BaseSettings):
         if self.trading_mode == TradingMode.LIVE and self.live_trading_confirm != LIVE_CONFIRM_PHRASE:
             raise ValueError(
                 "TRADING_MODE=live requires LIVE_TRADING_CONFIRM="
-                f"{LIVE_CONFIRM_PHRASE}. V1 is designed for the OANDA practice account."
+                f"{LIVE_CONFIRM_PHRASE}. V1 is designed for the Capital.com demo account."
             )
         return self
 
@@ -198,20 +201,28 @@ class Settings(BaseSettings):
         return self.trading_mode == TradingMode.DEMO
 
     @property
-    def oanda_rest_url(self) -> str:
-        return OANDA_HOSTS[self.trading_mode.value]["rest"]
+    def capital_base_url(self) -> str:
+        return CAPITAL_HOSTS[self.trading_mode.value]
 
     @property
-    def oanda_stream_url(self) -> str:
-        return OANDA_HOSTS[self.trading_mode.value]["stream"]
+    def capital_api_key(self) -> str:
+        return self.capital_demo_api_key if self.is_demo else self.capital_live_api_key
 
     @property
-    def oanda_api_token(self) -> str:
-        return self.oanda_practice_api_token if self.is_demo else self.oanda_live_api_token
+    def capital_identifier(self) -> str:
+        return self.capital_demo_identifier if self.is_demo else self.capital_live_identifier
 
     @property
-    def oanda_account_id(self) -> str:
-        return self.oanda_practice_account_id if self.is_demo else self.oanda_live_account_id
+    def capital_api_password(self) -> str:
+        return self.capital_demo_api_password if self.is_demo else self.capital_live_api_password
+
+    @property
+    def capital_account_id(self) -> str:
+        return self.capital_demo_account_id if self.is_demo else self.capital_live_account_id
+
+    @property
+    def broker_epic(self) -> str:
+        return self.capital_epic or self.instrument.replace("_", "")
 
     @property
     def news_model(self) -> str:
@@ -239,15 +250,16 @@ class Settings(BaseSettings):
         return to_asyncpg_url(self.database_url)
 
     def require_broker_credentials(self) -> None:
-        missing = []
-        if not self.oanda_api_token:
-            missing.append(
-                "OANDA_PRACTICE_API_TOKEN" if self.is_demo else "OANDA_LIVE_API_TOKEN"
+        prefix = "CAPITAL_DEMO_" if self.is_demo else "CAPITAL_LIVE_"
+        missing = [
+            prefix + name
+            for name, value in (
+                ("API_KEY", self.capital_api_key),
+                ("IDENTIFIER", self.capital_identifier),
+                ("API_PASSWORD", self.capital_api_password),
             )
-        if not self.oanda_account_id:
-            missing.append(
-                "OANDA_PRACTICE_ACCOUNT_ID" if self.is_demo else "OANDA_LIVE_ACCOUNT_ID"
-            )
+            if not value
+        ]
         if missing:
             raise RuntimeError(f"Missing broker configuration: {', '.join(missing)}")
 

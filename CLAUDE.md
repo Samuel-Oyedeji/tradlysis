@@ -1,6 +1,8 @@
 # Tradlysis – notes for AI assistants
 
-- Spec: V1 of an AI-assisted FX bot (EUR/USD, trend pullback, OANDA practice account). See README.md.
+- Spec: V1 of an AI-assisted FX/CFD bot (EUR/USD, trend pullback, Capital.com demo account). See README.md.
+- Broker access lives only in `app/broker/capital.py` (REST + WebSocket); services use the neutral types in
+  `app/broker/types.py`. Tests run the real client against `tests/fake_broker.py` (httpx MockTransport).
 - Python 3.11 engine; Prisma is used ONLY for schema + migrations (`prisma/`). Python uses SQLAlchemy models in
   `app/db/models.py` that must mirror `prisma/schema.prisma` (enforced by `tests/test_schema_sync.py`).
   Schema change = edit schema.prisma -> `npx prisma migrate dev --name x` -> update models.py -> tests.

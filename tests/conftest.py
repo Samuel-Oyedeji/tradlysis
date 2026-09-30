@@ -25,8 +25,9 @@ def make_settings(**overrides) -> Settings:
     base = dict(
         _env_file=None,
         database_url=TEST_DATABASE_URL or "postgresql://u:p@localhost:5432/db",
-        oanda_practice_api_token="test-token",
-        oanda_practice_account_id="101-001-0000000-001",
+        capital_demo_api_key="test-api-key",
+        capital_demo_identifier="bot@example.com",
+        capital_demo_api_password="api-key-password",
         openrouter_api_key="test-key",
         dashboard_password="secret",
     )

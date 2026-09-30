@@ -2,12 +2,18 @@
 
 Guarantees:
   * An order row (status PENDING_SUBMIT) is committed *before* the request is sent, with a
-    unique ``client_order_id`` that is also sent to OANDA as ``clientExtensions.id``. The
-    ``risk_check_id`` column is unique, so one approved risk check can create at most one order.
+    unique ``client_order_id``. The ``risk_check_id`` column is unique, so one approved risk
+    check can create at most one order.
+  * Open-only: right before submitting, the broker's open positions are re-read and the entry is
+    refused if one already exists on the instrument (on a non-hedging account an opposite order
+    would otherwise close or reduce it). The risk engine checks this too; this closes the race.
+  * Slippage bound: Capital.com market orders carry no price bound, so a fill worse than
+    ``price_bound`` (entry +/- MAX_SLIPPAGE_PIPS) is closed immediately, which has the same
+    effect as a bounded order being rejected (plus the spread).
   * A timeout or connection error never counts as "not filled" or "filled": the order becomes
-    UNKNOWN and is resolved by looking it up by client ID. Only if the broker confirms the
-    order does not exist is it resubmitted (same client ID, bounded attempts).
-  * ``positionFill=OPEN_ONLY`` so an entry order can never close or reduce another position.
+    UNKNOWN and is resolved from the broker (the deal confirmation when the deal reference is
+    known, otherwise open positions and activity history). Capital.com has no client order IDs,
+    so the broker not knowing an order is no proof it never arrived: entries are never resubmitted.
   * The kill switch is re-read immediately before submission.
 """
 
@@ -16,14 +22,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 
 from app.alerts.notifier import Notifier
-from app.broker.oanda import InstrumentInfo, OandaClient, OandaTransportError
+from app.broker.capital import CapitalClient, CapitalTransportError
+from app.broker.types import BrokerPosition, InstrumentInfo
 from app.config.settings import Settings
 from app.db.control import is_kill_switch_active
 from app.db.enums import OPEN_ORDER_STATUSES, Direction, OrderPurpose, OrderStatus, TradeState
@@ -34,16 +41,19 @@ from app.risk.engine import RiskResult
 
 log = logging.getLogger(__name__)
 COMPONENT = "execution"
-MAX_SUBMIT_ATTEMPTS = 2
 LOOKUP_DELAY_SECONDS = 2.0
-CLIENT_TAG = "tradlysis"
+CONFIRM_ATTEMPTS = 6
+CONFIRM_DELAY_SECONDS = 0.5
+# How far around the submission time a broker deal may be matched to an order without a deal reference.
+MATCH_BEFORE = timedelta(seconds=60)
+MATCH_AFTER = timedelta(minutes=10)
 
 
 class OrderExecutor:
     def __init__(
         self,
         settings: Settings,
-        client: OandaClient,
+        client: CapitalClient,
         db: Database,
         notifier: Notifier,
         instrument: InstrumentInfo,
@@ -71,7 +81,22 @@ class OrderExecutor:
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason=f"KILL_SWITCH: {reason}")
                 await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", f"Kill switch active: {reason}")
                 return await self._get(order.id)
+            blocked = await self._open_only_violation()
+            if blocked:
+                await self._update(order.id, status=OrderStatus.FAILED, reject_reason=blocked)
+                await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", blocked)
+                return await self._get(order.id)
             return await self._submit(order.id)
+
+    async def _open_only_violation(self) -> str | None:
+        try:
+            positions = await self.client.get_positions()
+        except Exception as exc:
+            return f"OPEN_ONLY: could not verify open positions: {exc}"[:500]
+        existing = [p.deal_id for p in positions if p.instrument == self.instrument.name]
+        if existing:
+            return f"OPEN_ONLY: a position is already open on {self.instrument.name} ({', '.join(existing)})"
+        return None
 
     async def _create_order_row(self, risk_check_id: int, request_id: int, risk: RiskResult) -> Order:
         inst = self.instrument
@@ -80,20 +105,13 @@ class OrderExecutor:
         price_bound = round(risk.entry + slip if long else risk.entry - slip, inst.display_precision)
         client_order_id = f"tlys-{request_id}-{uuid.uuid4().hex[:8]}"
         payload: dict[str, Any] = {
-            "type": "MARKET",
-            "instrument": inst.name,
-            "units": str(risk.units),
-            "timeInForce": "FOK",
-            "positionFill": "OPEN_ONLY",
-            "priceBound": inst.format_price(price_bound),
-            "stopLossOnFill": {"price": inst.format_price(risk.stop_loss), "timeInForce": "GTC"},
-            "takeProfitOnFill": {"price": inst.format_price(risk.take_profit), "timeInForce": "GTC"},
-            "clientExtensions": {
-                "id": client_order_id,
-                "tag": CLIENT_TAG,
-                "comment": self.settings.experiment_name[:100],
-            },
-            "tradeClientExtensions": {"id": client_order_id, "tag": CLIENT_TAG},
+            "epic": inst.epic or self.client.epic,
+            "direction": str(risk.direction),
+            "size": abs(risk.units),
+            "guaranteedStop": False,
+            "trailingStop": False,
+            "stopLevel": round(risk.stop_loss, inst.display_precision),
+            "profitLevel": round(risk.take_profit, inst.display_precision),
         }
         async with self.db.session() as s:
             order = Order(
@@ -119,139 +137,274 @@ class OrderExecutor:
 
     async def _submit(self, order_id: int) -> Order:
         order = await self._get(order_id)
-        while order.attempts < MAX_SUBMIT_ATTEMPTS:
-            await self._update(order.id, attempts=order.attempts + 1, submitted_at=utcnow())
-            try:
-                status, body = await self.client.create_order(order.request_payload)
-            except OandaTransportError as exc:
-                await self._update(order.id, status=OrderStatus.UNKNOWN, reject_reason=str(exc)[:500])
-                await self.notifier.warning(
-                    COMPONENT, "ORDER_OUTCOME_UNKNOWN", f"{order.client_order_id}: {exc}; resolving via lookup"
-                )
-                await asyncio.sleep(LOOKUP_DELAY_SECONDS)
-                resolved = await self.resolve_order(order.id)
-                if resolved is None:
-                    # Broker confirms the order does not exist: safe to resubmit with the same client ID.
-                    order = await self._get(order.id)
-                    continue
-                return resolved
-            order = await self._apply_create_response(order.id, status, body)
-            if order.status == OrderStatus.UNKNOWN:
-                await asyncio.sleep(LOOKUP_DELAY_SECONDS)
-                resolved = await self.resolve_order(order.id)
-                if resolved is None:
-                    order = await self._get(order.id)
-                    continue
-                return resolved
-            return order
-
-        order = await self._get(order.id)
-        if order.status in (OrderStatus.UNKNOWN, OrderStatus.PENDING_SUBMIT):
-            await self._update(order.id, status=OrderStatus.FAILED, reject_reason="max submit attempts reached")
-            await self.notifier.error(
-                COMPONENT, "ORDER_FAILED", f"{order.client_order_id}: gave up after {order.attempts} attempts"
+        await self._update(order.id, attempts=order.attempts + 1, submitted_at=utcnow())
+        try:
+            status, body = await self.client.open_position(order.request_payload)
+        except CapitalTransportError as exc:
+            await self._update(order.id, status=OrderStatus.UNKNOWN, reject_reason=str(exc)[:500])
+            await self.notifier.warning(
+                COMPONENT, "ORDER_OUTCOME_UNKNOWN", f"{order.client_order_id}: {exc}; resolving from broker state"
             )
-        return await self._get(order.id)
+            return await self._resolve_after_unknown(order.id)
+        return await self._apply_open_response(order.id, status, body)
 
-    async def _apply_create_response(self, order_id: int, status: int, body: dict[str, Any]) -> Order:
-        fill = body.get("orderFillTransaction")
-        cancel = body.get("orderCancelTransaction")
-        reject = body.get("orderRejectTransaction")
-        create = body.get("orderCreateTransaction")
-        common: dict[str, Any] = {"response_payload": body, "http_status": status}
-        if create:
-            common["broker_order_id"] = create.get("id")
-
-        if status == 201 and fill:
-            opened = fill.get("tradeOpened") or {}
-            await self._update(
-                order_id,
-                status=OrderStatus.FILLED,
-                fill_transaction_id=fill.get("id"),
-                broker_trade_id=opened.get("tradeID"),
-                fill_price=_f(opened.get("price") or fill.get("price")),
-                filled_units=_i(opened.get("units") or fill.get("units")),
-                filled_at=parse_time(fill["time"]) if fill.get("time") else utcnow(),
-                **common,
-            )
-            order = await self._get(order_id)
-            await self._record_trade_from_fill(order, fill)
-            await self.notifier.info(
-                COMPONENT,
-                "ORDER_FILLED",
-                f"{order.direction} {abs(order.filled_units or order.units)} {order.instrument} @ "
-                f"{order.fill_price} (SL {order.stop_loss}, TP {order.take_profit})",
-                alert=True,
-                dedup_key=f"fill_{order.client_order_id}",
-            )
-            return order
-        if status == 201 and cancel:
-            reason = cancel.get("reason", "CANCELLED")
-            await self._update(order_id, status=OrderStatus.CANCELLED, reject_reason=reason, **common)
-            await self.notifier.warning(COMPONENT, "ORDER_CANCELLED", f"Broker cancelled order: {reason}")
-            return await self._get(order_id)
-        if status == 201:
-            await self._update(order_id, status=OrderStatus.SUBMITTED, **common)
-            return await self._get(order_id)
-        if reject or status in (400, 404):
-            reason = (reject or {}).get("rejectReason") or body.get("errorCode") or body.get("errorMessage") or f"HTTP {status}"
-            await self._update(order_id, status=OrderStatus.REJECTED, reject_reason=str(reason), **common)
-            await self.notifier.error(COMPONENT, "ORDER_REJECTED", f"Broker rejected order: {reason}", details=body)
-            return await self._get(order_id)
-        # 401/403/5xx or anything unexpected: outcome unknown until looked up.
-        await self._update(order_id, status=OrderStatus.UNKNOWN, reject_reason=f"HTTP {status}", **common)
-        await self.notifier.error(COMPONENT, "ORDER_HTTP_ERROR", f"Order request returned HTTP {status}", details=body)
+    async def _resolve_after_unknown(self, order_id: int) -> Order:
+        await asyncio.sleep(LOOKUP_DELAY_SECONDS)
+        resolved = await self.resolve_order(order_id)
+        if resolved is not None:
+            return resolved
+        order = await self._get(order_id)
+        await self._update(
+            order_id,
+            status=OrderStatus.FAILED,
+            reject_reason=f"outcome unknown, no matching deal at broker; not resubmitted ({order.reject_reason})"[:500],
+        )
+        await self.notifier.error(
+            COMPONENT, "ORDER_FAILED", f"{order.client_order_id}: no matching deal found at the broker; not resubmitted"
+        )
         return await self._get(order_id)
 
-    async def resolve_order(self, order_id: int) -> Order | None:
-        """Look an order up at the broker by client ID and update the row.
+    async def _apply_open_response(self, order_id: int, status: int, body: dict[str, Any]) -> Order:
+        common: dict[str, Any] = {"response_payload": {"open": body}, "http_status": status}
+        reference = body.get("dealReference")
+        if status == 200 and reference:
+            await self._update(order_id, status=OrderStatus.SUBMITTED, broker_order_id=str(reference), **common)
+            return await self._confirm(order_id)
+        if 400 <= status < 500:
+            reason = body.get("errorCode") or body.get("message") or f"HTTP {status}"
+            await self._update(order_id, status=OrderStatus.REJECTED, reject_reason=str(reason)[:500], **common)
+            await self.notifier.error(COMPONENT, "ORDER_REJECTED", f"Broker rejected order: {reason}", details=body)
+            return await self._get(order_id)
+        # 5xx or anything unexpected: outcome unknown until resolved from broker state.
+        await self._update(order_id, status=OrderStatus.UNKNOWN, reject_reason=f"HTTP {status}", **common)
+        await self.notifier.error(COMPONENT, "ORDER_HTTP_ERROR", f"Order request returned HTTP {status}", details=body)
+        return await self._resolve_after_unknown(order_id)
 
-        Returns the updated order, or None if the broker confirms it does not exist.
-        Raises nothing on transport errors: the order simply stays UNKNOWN.
+    async def _confirm(self, order_id: int) -> Order:
+        """Poll the deal confirmation for a submitted order."""
+        order = await self._get(order_id)
+        assert order.broker_order_id
+        for attempt in range(CONFIRM_ATTEMPTS):
+            try:
+                conf = await self.client.get_confirmation(order.broker_order_id)
+            except Exception as exc:
+                log.warning("confirmation lookup failed for %s: %s", order.broker_order_id, exc)
+                conf = None
+            if conf and conf.get("dealStatus") in ("ACCEPTED", "REJECTED"):
+                return await self._apply_confirmation(order_id, conf)
+            if attempt < CONFIRM_ATTEMPTS - 1:
+                await asyncio.sleep(CONFIRM_DELAY_SECONDS)
+        # Accepted for processing but not confirmed yet; reconciliation resolves it by deal reference.
+        await self.notifier.warning(
+            COMPONENT, "ORDER_UNCONFIRMED", f"{order.client_order_id}: no deal confirmation yet ({order.broker_order_id})"
+        )
+        return await self._get(order_id)
+
+    async def _apply_confirmation(self, order_id: int, conf: dict[str, Any]) -> Order:
+        order = await self._get(order_id)
+        payload = {**(order.response_payload or {}), "confirmation": conf}
+        if conf.get("dealStatus") == "REJECTED":
+            reason = str(conf.get("reason") or conf.get("status") or "REJECTED")
+            await self._update(order_id, status=OrderStatus.REJECTED, reject_reason=reason[:500], response_payload=payload)
+            await self.notifier.error(COMPONENT, "ORDER_REJECTED", f"Broker rejected order: {reason}", details=conf)
+            return await self._get(order_id)
+        deal_id = _opened_deal_id(conf)
+        price = _f(conf.get("level"))
+        position = None
+        if price is None and deal_id:
+            position = await self._safe_get_position(deal_id)
+            price = position.open_price if position else None
+        size = _i(conf.get("size")) or abs(order.units)
+        return await self._mark_filled(
+            order,
+            deal_id=deal_id,
+            price=price,
+            units=size if order.direction == Direction.BUY else -size,
+            filled_at=position.open_time if position else utcnow(),
+            fill_ref=str(conf.get("dealId")) if conf.get("dealId") else None,
+            payload=payload,
+            raw={"confirmation": conf},
+        )
+
+    async def _mark_filled(
+        self,
+        order: Order,
+        *,
+        deal_id: str | None,
+        price: float | None,
+        units: int,
+        filled_at: datetime,
+        fill_ref: str | None,
+        payload: dict[str, Any],
+        raw: dict[str, Any],
+    ) -> Order:
+        await self._update(
+            order.id,
+            status=OrderStatus.FILLED,
+            broker_trade_id=deal_id,
+            fill_transaction_id=fill_ref,
+            fill_price=price,
+            filled_units=units,
+            filled_at=filled_at,
+            response_payload=payload,
+        )
+        order = await self._get(order.id)
+        if deal_id:
+            await self._upsert_trade(
+                order, broker_trade_id=deal_id, units=units, price=price or 0.0, open_time=filled_at, raw=raw
+            )
+        await self.notifier.info(
+            COMPONENT,
+            "ORDER_FILLED",
+            f"{order.direction} {abs(order.filled_units or order.units)} {order.instrument} @ "
+            f"{order.fill_price} (SL {order.stop_loss}, TP {order.take_profit})",
+            alert=True,
+            dedup_key=f"fill_{order.client_order_id}",
+        )
+        await self._enforce_slippage_bound(order)
+        return await self._get(order.id)
+
+    async def _enforce_slippage_bound(self, order: Order) -> None:
+        if order.fill_price is None or order.price_bound is None or not order.broker_trade_id:
+            return
+        eps = self.instrument.pip_size * 1e-3
+        long = order.direction == Direction.BUY
+        worse = order.fill_price > order.price_bound + eps if long else order.fill_price < order.price_bound - eps
+        if not worse:
+            return
+        slip = abs(order.fill_price - (order.requested_price or order.fill_price)) / self.instrument.pip_size
+        reason = (
+            f"slippage {slip:.1f} pips exceeds MAX_SLIPPAGE_PIPS={self.settings.max_slippage_pips} "
+            f"(fill {order.fill_price}, bound {order.price_bound})"
+        )
+        await self.notifier.error(COMPONENT, "SLIPPAGE_EXCEEDED", f"{order.client_order_id}: {reason}; closing", alert=True)
+        await self._close_position(order.broker_trade_id, order.instrument, order.filled_units or order.units, reason)
+
+    # ------------------------------------------------------------------ resolution
+
+    async def resolve_order(self, order_id: int) -> Order | None:
+        """Resolve an entry order from broker state and update the row.
+
+        Returns the updated order, or None if the broker has no trace of it.
+        Raises nothing on lookup errors: the order simply stays as it is.
         """
         order = await self._get(order_id)
         try:
-            broker_order = await self.client.get_order(f"@{order.client_order_id}")
+            if order.broker_order_id:
+                conf = await self.client.get_confirmation(order.broker_order_id)
+                if conf and conf.get("dealStatus") in ("ACCEPTED", "REJECTED"):
+                    return await self._apply_confirmation(order.id, conf)
+            match = await self._find_broker_deal(order)
         except Exception as exc:
             log.warning("Order lookup failed for %s: %s", order.client_order_id, exc)
             return order
-        if broker_order is None:
+        if match is None:
             return None
-        state = broker_order.get("state")
-        if state == "FILLED":
-            trade_id = broker_order.get("tradeOpenedID")
-            trade = await self.client.get_trade(trade_id) if trade_id else None
+        kind, data = match
+        if kind == "position":
+            p: BrokerPosition = data
+            await self.notifier.info(COMPONENT, "ORDER_RESOLVED", f"Resolved {order.client_order_id} as FILLED ({p.deal_id})")
+            return await self._mark_filled(
+                order,
+                deal_id=p.deal_id,
+                price=p.open_price,
+                units=p.units,
+                filled_at=p.open_time,
+                fill_ref=None,
+                payload={**(order.response_payload or {}), "lookup": {"position": p.raw}},
+                raw={"position": p.raw},
+            )
+        activity: dict[str, Any] = data
+        payload = {**(order.response_payload or {}), "lookup": {"activity": activity}}
+        if kind == "rejected":
+            await self._update(order.id, status=OrderStatus.REJECTED, reject_reason="REJECTED", response_payload=payload)
+            return await self._get(order.id)
+        details = activity.get("details") or {}
+        opened_at = parse_time(str(activity["dateUTC"])) if activity.get("dateUTC") else utcnow()
+        size = _i(details.get("size")) or abs(order.units)
+        await self.notifier.info(COMPONENT, "ORDER_RESOLVED", f"Resolved {order.client_order_id} as FILLED from activity")
+        return await self._mark_filled(
+            order,
+            deal_id=_activity_opened_deal(activity),
+            price=_f(details.get("level")),
+            units=size if order.direction == Direction.BUY else -size,
+            filled_at=opened_at,
+            fill_ref=None,
+            payload=payload,
+            raw={"activity": activity},
+        )
+
+    async def _find_broker_deal(self, order: Order) -> tuple[str, Any] | None:
+        """Find the deal an order without a confirmation produced: an open position, else activity history."""
+        submitted = order.submitted_at or order.created_at
+        known = await self._known_trade_ids()
+        for p in sorted(await self.client.get_positions(), key=lambda x: x.open_time):
+            if p.deal_id not in known and self._position_matches(order, p, submitted):
+                return "position", p
+        activities = await self.client.get_activity(submitted - MATCH_BEFORE)
+        for a in sorted(activities, key=lambda x: str(x.get("dateUTC", ""))):
+            if a.get("type") != "POSITION":
+                continue
+            details = a.get("details") or {}
+            if details.get("direction") != order.direction or _i(details.get("size")) != abs(order.units):
+                continue
+            if a.get("status") == "REJECTED":
+                return "rejected", a
+            actions = details.get("actions") or []
+            deal_id = _activity_opened_deal(a)
+            if any(x.get("actionType") == "POSITION_OPENED" for x in actions) and deal_id not in known:
+                return "opened", a
+        return None
+
+    def _position_matches(self, order: Order, p: BrokerPosition, submitted: datetime) -> bool:
+        tol = self.instrument.pip_size / 2
+        return (
+            p.instrument == order.instrument
+            and p.direction == order.direction
+            and abs(p.units) == abs(order.units)
+            and submitted - MATCH_BEFORE <= p.open_time <= submitted + MATCH_AFTER
+            and _near(p.stop_loss, order.stop_loss, tol)
+            and _near(p.take_profit, order.take_profit, tol)
+        )
+
+    async def adopt_position(self, p: BrokerPosition) -> Order | None:
+        """Link a broker position with no local trade to the entry order that created it, if any.
+
+        Used by reconciliation: an order whose outcome was unknown (or that was marked FAILED
+        because the broker showed no trace of it yet) is matched on instrument, direction, size,
+        stop-loss, take-profit and time.
+        """
+        async with self.db.session() as s:
+            order = await s.scalar(select(Order).where(Order.broker_trade_id == p.deal_id))
+            if order is None:
+                rows = (
+                    await s.scalars(
+                        select(Order)
+                        .where(
+                            Order.purpose == str(OrderPurpose.ENTRY),
+                            Order.status.in_([*[str(x) for x in OPEN_ORDER_STATUSES], str(OrderStatus.FAILED)]),
+                            Order.broker_trade_id.is_(None),
+                            Order.submitted_at.is_not(None),
+                        )
+                        .order_by(Order.created_at)
+                    )
+                ).all()
+                order = next((o for o in rows if self._position_matches(o, p, o.submitted_at)), None)
+        if order is None:
+            return None
+        if order.status != OrderStatus.FILLED:
             await self._update(
                 order.id,
                 status=OrderStatus.FILLED,
-                broker_order_id=broker_order.get("id"),
-                fill_transaction_id=broker_order.get("fillingTransactionID"),
-                broker_trade_id=trade_id,
-                fill_price=_f(trade.get("price")) if trade else None,
-                filled_units=_i(trade.get("initialUnits")) if trade else None,
-                filled_at=parse_time(broker_order["filledTime"]) if broker_order.get("filledTime") else utcnow(),
-                response_payload={"lookup": broker_order, "trade": trade},
+                broker_trade_id=p.deal_id,
+                fill_price=p.open_price,
+                filled_units=p.units,
+                filled_at=p.open_time,
+                response_payload={**(order.response_payload or {}), "adopted": {"position": p.raw}},
             )
-            order = await self._get(order.id)
-            if trade:
-                await self._record_trade(order, trade)
-            await self.notifier.info(
-                COMPONENT, "ORDER_FILLED", f"Resolved {order.client_order_id} as FILLED", alert=True
+            await self.notifier.warning(
+                COMPONENT, "ORDER_ADOPTED", f"{order.client_order_id} matched to broker position {p.deal_id}; marked FILLED"
             )
-            return order
-        if state == "CANCELLED":
-            await self._update(
-                order.id,
-                status=OrderStatus.CANCELLED,
-                broker_order_id=broker_order.get("id"),
-                reject_reason="CANCELLED",
-                response_payload={"lookup": broker_order},
-            )
-            return await self._get(order.id)
-        await self._update(
-            order.id, status=OrderStatus.SUBMITTED, broker_order_id=broker_order.get("id"),
-            response_payload={"lookup": broker_order},
-        )
         return await self._get(order.id)
 
     async def resolve_unresolved_orders(self, min_age_seconds: float = 0.0) -> None:
@@ -269,92 +422,113 @@ class OrderExecutor:
                 await s.scalars(
                     select(Order).where(
                         Order.status.in_([str(x) for x in OPEN_ORDER_STATUSES]),
-                        Order.purpose == str(OrderPurpose.ENTRY),
                         Order.created_at <= cutoff,
                     )
                 )
             ).all()
         for order in rows:
+            if order.purpose == OrderPurpose.CLOSE:
+                await self._resolve_close(order)
+                continue
             resolved = await self.resolve_order(order.id)
             if resolved is None:
-                # The broker never received it. Do not resubmit stale entries; mark failed.
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason="not found at broker")
                 await self.notifier.warning(
-                    COMPONENT, "ORDER_NOT_FOUND", f"{order.client_order_id} never reached the broker; marked FAILED"
+                    COMPONENT, "ORDER_NOT_FOUND", f"{order.client_order_id} not found at the broker; marked FAILED"
                 )
 
-    # ------------------------------------------------------------------ flatten
+    async def _resolve_close(self, order: Order) -> None:
+        deal_id = (order.request_payload or {}).get("deal_id")
+        if not deal_id:
+            return
+        try:
+            position = await self.client.get_position(str(deal_id))
+        except Exception as exc:
+            log.warning("close lookup failed for %s: %s", order.client_order_id, exc)
+            return
+        if position is None:
+            await self._update(order.id, status=OrderStatus.FILLED, filled_at=utcnow())
+        else:
+            await self._update(order.id, status=OrderStatus.FAILED, reject_reason="position still open")
+
+    # ------------------------------------------------------------------ closing
 
     async def flatten_all(self, reason: str) -> int:
-        """Close every open trade on the account (used by the dashboard 'flatten' control)."""
-        trades = await self.client.get_open_trades()
+        """Close every open position on the account (used by the dashboard 'flatten' control)."""
+        positions = await self.client.get_positions()
         closed = 0
-        for t in trades:
-            client_order_id = f"tlys-close-{t['id']}-{uuid.uuid4().hex[:6]}"
-            async with self.db.session() as s:
-                row = Order(
-                    client_order_id=client_order_id,
-                    purpose=OrderPurpose.CLOSE,
-                    instrument=t["instrument"],
-                    direction=Direction.SELL if int(float(t["currentUnits"])) > 0 else Direction.BUY,
-                    units=-int(float(t["currentUnits"])),
-                    order_type="TRADE_CLOSE",
-                    status=OrderStatus.PENDING_SUBMIT,
-                    request_payload={"trade_id": t["id"], "units": "ALL", "reason": reason},
-                    attempts=1,
-                    submitted_at=utcnow(),
-                )
-                s.add(row)
-                await s.flush()
-                row_id = row.id
-            try:
-                status, body = await self.client.close_trade(t["id"])
-            except OandaTransportError as exc:
-                await self._update(row_id, status=OrderStatus.UNKNOWN, reject_reason=str(exc)[:500])
-                continue
-            fill = body.get("orderFillTransaction")
-            if status == 200 and fill:
-                await self._update(
-                    row_id, status=OrderStatus.FILLED, fill_price=_f(fill.get("price")),
-                    fill_transaction_id=fill.get("id"), response_payload=body, http_status=status,
-                    filled_at=utcnow(),
-                )
+        for p in positions:
+            if await self._close_position(p.deal_id, p.instrument, p.units, reason):
                 closed += 1
-            else:
-                await self._update(
-                    row_id, status=OrderStatus.REJECTED, response_payload=body, http_status=status,
-                    reject_reason=str(body.get("errorMessage") or body.get("errorCode") or status),
-                )
-        await self.notifier.warning(COMPONENT, "FLATTENED", f"Closed {closed}/{len(trades)} trades: {reason}", alert=True)
+        await self.notifier.warning(COMPONENT, "FLATTENED", f"Closed {closed}/{len(positions)} trades: {reason}", alert=True)
         return closed
+
+    async def _close_position(self, deal_id: str, instrument: str, units: int, reason: str) -> bool:
+        client_order_id = f"tlys-close-{deal_id[-12:]}-{uuid.uuid4().hex[:6]}"
+        async with self.db.session() as s:
+            row = Order(
+                client_order_id=client_order_id,
+                purpose=OrderPurpose.CLOSE,
+                instrument=instrument,
+                direction=Direction.SELL if units > 0 else Direction.BUY,
+                units=-units,
+                order_type="POSITION_CLOSE",
+                status=OrderStatus.PENDING_SUBMIT,
+                request_payload={"deal_id": deal_id, "reason": reason[:300]},
+                attempts=1,
+                submitted_at=utcnow(),
+            )
+            s.add(row)
+            await s.flush()
+            row_id = row.id
+        try:
+            status, body = await self.client.close_position(deal_id)
+        except CapitalTransportError as exc:
+            await self._update(row_id, status=OrderStatus.UNKNOWN, reject_reason=str(exc)[:500])
+            return False
+        reference = body.get("dealReference")
+        if status != 200 or not reference:
+            await self._update(
+                row_id, status=OrderStatus.REJECTED, response_payload=body, http_status=status,
+                reject_reason=str(body.get("errorCode") or body.get("message") or f"HTTP {status}")[:500],
+            )
+            return False
+        conf = None
+        for attempt in range(CONFIRM_ATTEMPTS):
+            try:
+                conf = await self.client.get_confirmation(str(reference))
+            except Exception as exc:
+                log.warning("close confirmation lookup failed for %s: %s", reference, exc)
+            if conf and conf.get("dealStatus") in ("ACCEPTED", "REJECTED"):
+                break
+            if attempt < CONFIRM_ATTEMPTS - 1:
+                await asyncio.sleep(CONFIRM_DELAY_SECONDS)
+        payload = {"close": body, "confirmation": conf}
+        if conf and conf.get("dealStatus") == "REJECTED":
+            await self._update(
+                row_id, status=OrderStatus.REJECTED, response_payload=payload, http_status=status,
+                broker_order_id=str(reference), reject_reason=str(conf.get("reason") or "REJECTED")[:500],
+            )
+            return False
+        # Accepted (or confirmation not available yet: the broker accepted the close request).
+        await self._update(
+            row_id, status=OrderStatus.FILLED, response_payload=payload, http_status=status,
+            broker_order_id=str(reference), fill_price=_f((conf or {}).get("level")), filled_at=utcnow(),
+        )
+        return True
 
     # ------------------------------------------------------------------ helpers
 
-    async def _record_trade_from_fill(self, order: Order, fill: dict[str, Any]) -> None:
-        opened = fill.get("tradeOpened") or {}
-        trade_id = opened.get("tradeID")
-        if not trade_id:
-            return
-        units = _i(opened.get("units")) or order.units
-        price = _f(opened.get("price") or fill.get("price")) or 0.0
-        await self._upsert_trade(
-            order,
-            broker_trade_id=trade_id,
-            units=units,
-            price=price,
-            open_time=parse_time(fill["time"]) if fill.get("time") else utcnow(),
-            raw={"fill": fill},
-        )
+    async def _safe_get_position(self, deal_id: str) -> BrokerPosition | None:
+        try:
+            return await self.client.get_position(deal_id)
+        except Exception as exc:
+            log.warning("position lookup failed for %s: %s", deal_id, exc)
+            return None
 
-    async def _record_trade(self, order: Order, trade: dict[str, Any]) -> None:
-        await self._upsert_trade(
-            order,
-            broker_trade_id=trade["id"],
-            units=_i(trade.get("initialUnits")) or order.units,
-            price=_f(trade.get("price")) or 0.0,
-            open_time=parse_time(trade["openTime"]) if trade.get("openTime") else utcnow(),
-            raw={"trade": trade},
-        )
+    async def _known_trade_ids(self) -> set[str]:
+        async with self.db.session() as s:
+            return set((await s.scalars(select(Trade.broker_trade_id))).all())
 
     async def _upsert_trade(
         self, order: Order, *, broker_trade_id: str, units: int, price: float, open_time: Any, raw: dict[str, Any]
@@ -379,7 +553,7 @@ class OrderExecutor:
                     open_time=open_time,
                     stop_loss=order.stop_loss,
                     take_profit=order.take_profit,
-                    initial_risk_price=abs(price - order.stop_loss) if order.stop_loss else None,
+                    initial_risk_price=abs(price - order.stop_loss) if order.stop_loss and price else None,
                     state=TradeState.OPEN,
                     unexpected=False,
                     raw=raw,
@@ -398,6 +572,27 @@ class OrderExecutor:
             assert order is not None
             for k, v in values.items():
                 setattr(order, k, str(v) if isinstance(v, OrderStatus) else v)
+
+
+def _opened_deal_id(conf: dict[str, Any]) -> str | None:
+    """The position deal ID from a confirmation (``affectedDeals`` entry with status OPENED)."""
+    for deal in conf.get("affectedDeals") or []:
+        if deal.get("status") == "OPENED" and deal.get("dealId"):
+            return str(deal["dealId"])
+    return str(conf["dealId"]) if conf.get("dealId") else None
+
+
+def _activity_opened_deal(activity: dict[str, Any]) -> str | None:
+    for action in (activity.get("details") or {}).get("actions") or []:
+        if action.get("actionType") == "POSITION_OPENED" and action.get("affectedDealId"):
+            return str(action["affectedDealId"])
+    return str(activity["dealId"]) if activity.get("dealId") else None
+
+
+def _near(a: float | None, b: float | None, tol: float) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= tol
 
 
 def _f(v: Any) -> float | None:

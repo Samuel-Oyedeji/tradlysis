@@ -3,8 +3,8 @@
     python -m app.doctor            # all checks
     python -m app.doctor --telegram # also send a Telegram test message
 
-Safe to run at any time: it only reads from OANDA, sends one tiny prompt to OpenRouter and
-(optionally) one Telegram message.
+Safe to run at any time: it only reads from Capital.com (it never places orders), sends one tiny
+prompt to OpenRouter and (optionally) one Telegram message.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing
 
 from app.config.settings import Settings, get_settings
 
@@ -48,24 +49,56 @@ async def check_database(s: Settings) -> str:
     return f"connected; {len(rows)} migration(s) applied (latest: {rows[-1][0] if rows else 'none'})"
 
 
-async def check_oanda(s: Settings) -> str:
+async def check_capital(s: Settings) -> str:
     s.require_broker_credentials()
-    from app.broker.oanda import OandaClient
+    from app.broker.capital import CapitalClient
 
-    client = OandaClient(s.oanda_rest_url, s.oanda_stream_url, s.oanda_api_token, s.oanda_account_id, max_get_retries=1)
+    client = CapitalClient(
+        s.capital_base_url,
+        s.capital_api_key,
+        s.capital_identifier,
+        s.capital_api_password,
+        account_id=s.capital_account_id,
+        instrument=s.instrument,
+        epic=s.broker_epic,
+        stream_url=s.capital_stream_url,
+        max_get_retries=1,
+    )
     try:
-        acct = await client.get_account_summary()
-        inst = await client.get_instrument(s.instrument)
-        candles = await client.get_candles(s.instrument, "M15", count=3)
+        acct = await client.get_account()
+        inst = await client.get_instrument()
+        status = await client.get_market_status()
+        prefs = await client.get_preferences()
+        candles = await client.get_candles("M15", count=3)
+        stream = await _first_quote(client)
     finally:
         await client.aclose()
-    warn = ""
-    if s.is_demo and not s.oanda_account_id.startswith("101-"):
-        warn = " (warning: practice account IDs normally start with 101-)"
+    warn = []
+    if inst.lot_size != 1:
+        warn.append(f"lot size {inst.lot_size} != 1: the engine will refuse to start")
+    if prefs.get("hedgingMode"):
+        warn.append("hedging mode is ON (fine: the executor still refuses to open a second position)")
+    host = "demo" if "demo-api" in s.capital_base_url else "LIVE"
     return (
-        f"{s.trading_mode.value} account {acct.get('id')} {acct.get('currency')} NAV {acct.get('NAV')}; "
-        f"{inst.name} pip {inst.pip_size}; {len(candles)} candles fetched{warn}"
+        f"{host} host, account {acct.account_id} {acct.currency} equity {acct.nav} (available {acct.margin_available}); "
+        f"{inst.epic or s.broker_epic}: pip {inst.pip_size}, min size {inst.minimum_trade_size}, "
+        f"margin {inst.margin_rate:.2%}, status {status}; {len(candles)} M15 candles; stream: {stream}"
+        + (f" (warning: {'; '.join(warn)})" if warn else "")
     )
+
+
+async def _first_quote(client, timeout: float = 15.0) -> str:
+    async def first() -> str:
+        async with aclosing(client.stream_quotes()) as quotes:
+            async for quote in quotes:
+                if quote is not None:
+                    return f"live quote {quote.bid}/{quote.ask}"
+        return "closed without a quote"
+
+    try:
+        return await asyncio.wait_for(first(), timeout)
+    except TimeoutError:
+        return f"connected, no quote within {timeout:.0f}s (market closed?)"
 
 
 async def check_openrouter(s: Settings) -> str:
@@ -153,7 +186,7 @@ async def main() -> int:
 
     checks: list[tuple[str, Callable[[], Awaitable[str]]]] = [
         ("database", lambda: check_database(s)),
-        ("oanda", lambda: check_oanda(s)),
+        ("capital.com", lambda: check_capital(s)),
         ("openrouter", lambda: check_openrouter(s)),
         ("calendar", lambda: check_calendar(s)),
         ("rss", lambda: check_rss(s)),
