@@ -5,8 +5,8 @@ Trading Bot: Technical Architecture & V1 Product Specification*.
 
 V1 is an **experiment, not a claim of profitability**. It trades **EUR/USD** with one setup
 (**trend pullback**) on a **Capital.com demo account**. It combines deterministic
-technical analysis with structured news context and uses an LLM (`typesafe/jev-1.13` via
-OpenRouter) only to confirm setups. A deterministic risk engine has the final say. Every
+technical analysis with structured news context and uses TypeSafe's Jev decision model
+(`typesafe/jev-1.13`, through OpenRouter's Decisions API) only to confirm setups. A deterministic risk engine has the final say. Every
 decision opportunity is recorded, including WAITs and rejections.
 
 > Capital.com is a CFD broker, so this is a **CFD/FX trading experiment**: positions are
@@ -87,21 +87,39 @@ the **Session pooler** URI into `.env`, replacing `[YOUR-PASSWORD]` with your da
 DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
 ```
 
-- **Session pooler (port 5432) is the recommended choice.** It works for both the migrations and
-  the engine, and it is reachable over IPv4, which most VPSs and Docker networks need.
+- **Session pooler (port 5432) is the recommended choice.** It works for the engine and for
+  Prisma, and it is reachable over IPv4, which most VPSs and Docker networks need.
 - The **direct connection** (`db.<project-ref>.supabase.co:5432`) also works, but only over IPv6
   unless you have Supabase's IPv4 add-on.
 - The **transaction pooler** (port 6543) works for the engine: the bot detects it and turns off
   prepared-statement caching. Prisma migrations cannot run through it, so use the session
-  pooler URL when you run `npm run migrate:deploy`.
+  pooler URL if you ever run `npm run migrate:deploy`.
 - If your password contains special characters (`@`, `:`, `/`, `#`, `?`), URL-encode them
   (for example `@` becomes `%40`).
 - You don't need the bundled `db` service (`--profile local-db`) when using Supabase.
 
-## Database: Prisma schema + migrations (you run them)
+### Tables are created automatically
+
+At start-up the engine, API and analyzer check for the bot's 18 tables and create any that are
+missing, with the same indexes and foreign keys as the Prisma migration. They never alter, empty
+or drop a table, and they never touch tables that aren't the bot's, so it is safe on a database
+shared with other apps. Tables the bot creates get row-level security switched on (with no
+policies), which keeps them out of Supabase's public REST API; the bot itself is unaffected.
+
+```bash
+python -m app.db.bootstrap --check   # report which tables are missing
+python -m app.db.bootstrap           # create them now instead of waiting for the engine
+```
+
+`python -m app.doctor` reports the same. Set `DB_AUTO_CREATE_TABLES=false` to switch the automatic
+creation off. Only *missing tables* are created: when a later version adds columns to an
+existing table, that change still comes from a Prisma migration (the doctor lists missing columns).
+
+## Database: Prisma schema + migrations (optional)
 
 `prisma/schema.prisma` is the single source of truth for the schema. The initial migration
-is in `prisma/migrations/`. Apply migrations yourself:
+is in `prisma/migrations/`. You don't need Prisma to get started (see above). Use it when a
+release ships a migration that changes existing tables:
 
 ```bash
 npm ci                     # installs the Prisma CLI (only needed for migrations)
@@ -109,6 +127,12 @@ npm run migrate:deploy     # = prisma migrate deploy, uses DATABASE_URL from .en
 # or with Docker:
 docker compose run --rm migrate
 ```
+
+`migrate deploy` only runs migration files that are not yet recorded in `_prisma_migrations`.
+If the tables were created by the bot or by hand, record the initial migration as applied first
+(this runs no SQL): `npx prisma migrate resolve --applied 20260930084057_init`.
+**On a shared database never run `prisma migrate dev`, `prisma migrate reset` or `prisma db push`:**
+they compare the whole database with this schema and can drop other apps' tables.
 
 The engine is Python, and Prisma's official client is TypeScript-only (the community Python
 client is archived). So the Python code reads and writes through SQLAlchemy models
@@ -210,9 +234,10 @@ place orders.
    (psychological) levels such as 1.1800. Stored in `technical_snapshots`,
    `support_resistance` and `market_regimes`.
 3. **News**: ForexFactory calendar (event, currency, impact, forecast, actual, surprise).
-   Python, not the LLM, turns a surprise into a currency and pair impact (for example, CPI
-   below forecast means USD bearish, so EUR/USD up; unemployment is inverted). Fed/ECB press
-   releases are interpreted by the LLM into a currency bias with confidence and reason codes.
+   Python, not the model, turns a surprise into a currency and pair impact (for example, CPI
+   below forecast means USD bearish, so EUR/USD up; unemployment is inverted). Jev reads each
+   Fed/ECB press release: the policy tone (hawkish / dovish / neutral, with its probability as
+   the confidence) becomes a currency bias, and the main theme becomes the reason code.
    The result gives a news risk level and a blackout flag (±30 min around high-impact USD/EUR
    events).
    *Limitation:* the free ForexFactory weekly feed normally carries forecast and previous
@@ -233,9 +258,14 @@ place orders.
    - The setup needs R:R of at least 1:2 (Experiment #1).
 5. **Market snapshot** is built and stored in `decision_requests` (unique per candle, so a
    restart never processes a candle twice).
-6. **Decision model** via OpenRouter, schema-constrained to `BUY | SELL | WAIT` with setup,
-   confidence and reason codes. It can confirm or decline the plan but **cannot change
-   entry, stop, target, size or any limit**. Invalid output, errors and timeouts become WAIT.
+6. **Decision model**: Jev through OpenRouter's Decisions API (`POST /api/alpha/decisions`).
+   The snapshot is sent as the *state* with typed questions: one choice of `BUY | SELL | WAIT`,
+   whose probability is the confidence, and five yes/no checks (trend support, pullback to a
+   level, momentum, room to target, news risk) that are recorded as reason codes. The rationale
+   shown on the dashboard is the probability of each option. Jev can confirm or decline the plan
+   but **cannot change entry, stop, target, size or any limit**. Invalid answers, errors and
+   timeouts become WAIT. (Setting `OPENROUTER_MODEL` to a chat model uses chat completions with
+   a JSON schema instead.)
    By default the model is only called when step 4 finds a candidate
    (`LLM_CALL_POLICY=candidates_only`); every other interval is still recorded as a
    prefilter WAIT with its reasons. Set `LLM_CALL_POLICY=always` to query it every interval.
@@ -317,14 +347,14 @@ app/
   news/            calendar/RSS providers, LLM interpretation, news state
   snapshot/        market snapshot builder
   strategy/        deterministic trend-pullback rules and trade plan
-  decision/        OpenRouter client, prompts (versioned), response schema
+  decision/        OpenRouter client (Decisions API + chat), prompts/questions (versioned), schema
   risk/            deterministic risk engine and currency conversion
   execution/       order executor (only component that submits orders)
   reconciliation/  broker ↔ database reconciliation and circuit breakers
   experiments/     analyzer (separate process)
   api/             FastAPI control plane + dashboard (static/index.html)
   alerts/          Telegram + system events
-  db/              SQLAlchemy models mirroring Prisma, sessions, control flags
+  db/              SQLAlchemy models mirroring Prisma, sessions, control flags, table bootstrap
   engine.py        orchestrator (python -m app.engine)
   doctor.py        setup checker (python -m app.doctor)
 prisma/            schema.prisma + migrations (source of truth for the database)

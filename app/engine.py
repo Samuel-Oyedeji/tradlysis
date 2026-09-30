@@ -27,6 +27,7 @@ from app.alerts.telegram import TelegramSender
 from app.broker.capital import CapitalClient
 from app.broker.types import InstrumentInfo
 from app.config.settings import LlmCallPolicy, Settings, get_settings
+from app.db.bootstrap import auto_create_tables
 from app.db.control import get_all_controls, set_control
 from app.db.enums import OPEN_ORDER_STATUSES, ControlKey, OrderPurpose, OrderStatus, TradeState
 from app.db.models import Decision, DecisionRequest, MarketRegime, Order, RiskCheck, Trade
@@ -150,7 +151,10 @@ class TradingEngine:
 
     async def start(self) -> None:
         s = self.settings
+        created = await auto_create_tables(self.db, s)
         summary = await self.setup()
+        if created:
+            await self.notifier.warning(COMPONENT, "TABLES_CREATED", f"Created missing tables: {', '.join(created)}")
         assert self.executor and self.reconciler and self.market
         await self.executor.resolve_unresolved_orders()
         await self.reconciler.reconcile_once()

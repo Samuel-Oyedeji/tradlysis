@@ -22,8 +22,16 @@ from tests.conftest import make_settings, trend_bars
 from tests.fake_broker import FakeBroker, make_client
 from tests.helpers import long_state
 
-BUY = {"decision": "BUY", "setup": "TREND_PULLBACK", "confidence": 0.8,
-       "reason_codes": ["HTF_BULLISH", "PULLBACK_TO_SUPPORT", "MOMENTUM_CONFIRMED"], "rationale": "ok"}
+# Decisions API answers (Jev): a BUY choice at 80% plus yes/no checks.
+BUY = {
+    "decision": {"type": "choice", "choice": "BUY", "confidence": 0.8,
+                 "probabilities": {"BUY": 0.8, "WAIT": 0.15, "SELL": 0.05}},
+    "htf_trend_supports": {"type": "noul", "noul": 0.9},
+    "pullback_to_level": {"type": "noul", "noul": 0.8},
+    "momentum_confirms": {"type": "noul", "noul": 0.7},
+    "room_to_target": {"type": "noul", "noul": 0.6},
+    "news_risk_high": {"type": "noul", "noul": 0.1},
+}
 
 
 class FakeCalendar:
@@ -43,10 +51,12 @@ def market_always_open(monkeypatch):
     monkeypatch.setattr("app.execution.executor.CONFIRM_DELAY_SECONDS", 0)
 
 
-def llm_client(payload, calls):
+def llm_client(answers, calls):
     def handler(req):
+        assert req.url.path == "/api/alpha/decisions"
         calls.append(json.loads(req.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(payload)}}]})
+        return httpx.Response(200, json={"answers": answers, "model": "typesafe/jev-1.13",
+                                         "usage": {"input_tokens": 900, "output_tokens": 6}})
 
     return OpenRouterClient("key", "https://or.test/api/v1", transport=httpx.MockTransport(handler))
 
@@ -74,6 +84,11 @@ def seed_candles(broker: FakeBroker, candle_time):
         "D": trend_bars(5, 1.09, 0.001, minutes=1440, start_time=candle_time - timedelta(days=6)),
         "W": trend_bars(3, 1.08, 0.002, minutes=10080, start_time=candle_time - timedelta(days=28)),
     }
+
+
+async def _decision(db):
+    async with db.session() as s:
+        return await s.scalar(select(Decision))
 
 
 async def count(db, model):
@@ -120,15 +135,21 @@ async def test_candidate_confirmed_approved_and_executed(db, monkeypatch):
     assert summary.approved, summary.rejections
     assert summary.order_status == "FILLED"
     assert len(calls) == 1
-    sent = json.loads(calls[0]["messages"][1]["content"].split("\n", 1)[1])
-    assert sent["setup_check"]["candidate"] is True
+    sent = calls[0]
+    assert sent["model"] == "typesafe/jev-1.13"
+    assert sent["state"]["setup_check"]["candidate"] is True  # the snapshot is the state
+    assert sent["questions"]["decision"]["type"] == "choice"
+    assert set(sent["questions"]["decision"]["criteria"]) == {"BUY", "SELL", "WAIT"}
     async with db.session() as s:
         req = await s.scalar(select(DecisionRequest))
         rc = await s.scalar(select(RiskCheck))
         order = await s.scalar(select(Order))
         trade = await s.scalar(select(Trade))
-    assert req.llm_called and req.model == "typesafe/jev-1.13" and req.prompt_version == "decision-v2"
-    assert req.messages[0]["role"] == "system"
+    assert req.llm_called and req.model == "typesafe/jev-1.13" and req.prompt_version == "decision-v3"
+    assert req.messages[0]["role"] == "questions"
+    dec = await _decision(db)
+    assert dec.confidence == pytest.approx(0.8) and dec.prompt_tokens == 900
+    assert dec.reason_codes == ["HTF_BULLISH", "PULLBACK_TO_SUPPORT", "MOMENTUM_CONFIRMED", "ROOM_TO_TARGET"]
     assert rc.approved and rc.units > 0 and rc.risk_pct == pytest.approx(0.25, abs=0.01)
     assert order.status == "FILLED" and order.units == rc.units
     assert trade.state == "OPEN" and trade.order_id == order.id

@@ -1,8 +1,10 @@
 """SQLAlchemy models mirroring ``prisma/schema.prisma``.
 
-Prisma owns the schema and migrations; these models only describe the existing tables so
-the Python engine can read and write them. Never call ``metadata.create_all`` in
-production. ``tests/test_schema_sync.py`` checks these models against the Prisma schema.
+Prisma owns the schema and migrations. These models describe the same tables so the Python engine
+can read and write them, and ``app/db/bootstrap.py`` can create any table that is missing. They
+therefore produce exactly the DDL of the Prisma migrations: unique keys are unique *indexes* named
+like Prisma's (``<table>_<columns>_key``) and timestamps default to ``CURRENT_TIMESTAMP``.
+``tests/test_schema_sync.py`` checks the models against the Prisma schema and the migrations.
 """
 
 from __future__ import annotations
@@ -20,9 +22,9 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    MetaData,
     Numeric,
     Text,
-    UniqueConstraint,
     func,
     text,
 )
@@ -34,7 +36,12 @@ MONEY = Numeric(20, 6)
 
 
 def _now_col(**kw: Any) -> Mapped[datetime]:
-    return mapped_column(TZ, nullable=False, server_default=func.now(), **kw)
+    return mapped_column(TZ, nullable=False, server_default=text("CURRENT_TIMESTAMP"), **kw)
+
+
+def _unique_index(*columns: str, name: str) -> Index:
+    """A unique index, which is what Prisma creates for ``@unique`` / ``@@unique``."""
+    return Index(name, *columns, unique=True)
 
 
 def _json_col(name: str | None = None) -> Mapped[dict]:
@@ -43,7 +50,8 @@ def _json_col(name: str | None = None) -> Mapped[dict]:
 
 
 class Base(DeclarativeBase):
-    pass
+    # Single-column ``unique=True, index=True`` columns get Prisma's unique index name.
+    metadata = MetaData(naming_convention={"ix": "%(table_name)s_%(column_0_name)s_key"})
 
 
 # --- Market data ----------------------------------------------------------------------
@@ -67,7 +75,7 @@ class MarketPrice(Base):
 class Candle(Base):
     __tablename__ = "candles"
     __table_args__ = (
-        UniqueConstraint(
+        _unique_index(
             "instrument", "granularity", "time", name="candles_instrument_granularity_time_key"
         ),
     )
@@ -92,7 +100,7 @@ class Candle(Base):
 class TechnicalSnapshot(Base):
     __tablename__ = "technical_snapshots"
     __table_args__ = (
-        UniqueConstraint(
+        _unique_index(
             "instrument",
             "timeframe",
             "candle_time",
@@ -166,7 +174,7 @@ class MarketRegime(Base):
 class NewsEvent(Base):
     __tablename__ = "news_events"
     __table_args__ = (
-        UniqueConstraint("provider", "external_id", name="news_events_provider_external_id_key"),
+        _unique_index("provider", "external_id", name="news_events_provider_external_id_key"),
         Index("news_events_event_time_idx", "event_time"),
         Index("news_events_currency_event_time_idx", "currency", "event_time"),
     )
@@ -194,7 +202,7 @@ class NewsEvent(Base):
 class NewsArticle(Base):
     __tablename__ = "news_articles"
     __table_args__ = (
-        UniqueConstraint(
+        _unique_index(
             "provider", "external_id", name="news_articles_provider_external_id_key"
         ),
         Index("news_articles_published_at_idx", "published_at"),
@@ -247,7 +255,7 @@ class NewsInterpretation(Base):
 class DecisionRequest(Base):
     __tablename__ = "decision_requests"
     __table_args__ = (
-        UniqueConstraint(
+        _unique_index(
             "experiment",
             "instrument",
             "candle_time",
@@ -283,6 +291,7 @@ class Decision(Base):
         ForeignKey("decision_requests.id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
         unique=True,
+        index=True,
     )
     source: Mapped[str] = mapped_column(Text, nullable=False)
     decision: Mapped[str] = mapped_column(Text, nullable=False)
@@ -311,12 +320,14 @@ class RiskCheck(Base):
         ForeignKey("decision_requests.id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
         unique=True,
+        index=True,
     )
     decision_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("decisions.id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
         unique=True,
+        index=True,
     )
     approved: Mapped[bool] = mapped_column(Boolean, nullable=False)
     checks: Mapped[Any] = mapped_column(JSONB, nullable=False)
@@ -345,11 +356,12 @@ class Order(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    client_order_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    client_order_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
     risk_check_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("risk_checks.id", ondelete="SET NULL", onupdate="CASCADE"),
         unique=True,
+        index=True,
     )
     purpose: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'ENTRY'"))
     instrument: Mapped[str] = mapped_column(Text, nullable=False)
@@ -388,7 +400,7 @@ class Trade(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    broker_trade_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    broker_trade_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
     order_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("orders.id", ondelete="SET NULL", onupdate="CASCADE")
     )
@@ -424,7 +436,7 @@ class BrokerTransaction(Base):
     __table_args__ = (Index("broker_transactions_time_idx", "time"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    transaction_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    transaction_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     type: Mapped[str] = mapped_column(Text, nullable=False)
     time: Mapped[datetime] = mapped_column(TZ, nullable=False)

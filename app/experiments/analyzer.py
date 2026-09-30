@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.config.settings import Settings, get_settings
+from app.db.bootstrap import auto_create_tables
 from app.db.enums import TradeState
 from app.db.models import (
     AccountSnapshot,
@@ -309,6 +310,7 @@ async def main() -> None:
     setup_logging(settings.log_level)
     db = Database(settings)
     try:
+        await auto_create_tables(db, settings)
         if args.once:
             print(json.dumps(await run_once(db, settings), indent=2, default=str))
             return
