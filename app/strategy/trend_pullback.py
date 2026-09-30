@@ -153,7 +153,7 @@ def evaluate_trend_pullback(
         )
         if not stop_ok:
             failures.append("STOP_TOO_WIDE")
-        rr_ok = plan.risk_reward >= settings.min_risk_reward
+        rr_ok = round(plan.risk_reward, 3) >= settings.min_risk_reward
         conditions.append(
             Condition(
                 "risk_reward",

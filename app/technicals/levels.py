@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -80,8 +81,10 @@ def cluster_swings(
     return zones
 
 
-def reference_levels(daily: Sequence[Bar], weekly: Sequence[Bar]) -> list[Level]:
-    """Previous day and previous week high/low (from completed candles)."""
+def reference_levels(
+    daily: Sequence[Bar], weekly: Sequence[Bar], monthly: Sequence[Bar] = ()
+) -> list[Level]:
+    """Previous day, week and month high/low (from completed candles)."""
     out: list[Level] = []
     if daily:
         d = daily[-1]
@@ -91,7 +94,22 @@ def reference_levels(daily: Sequence[Bar], weekly: Sequence[Bar]) -> list[Level]
         w = weekly[-1]
         out.append(Level("", "PREV_WEEK_HIGH", w.high, w.high, 1, 2.5, ["W"]))
         out.append(Level("", "PREV_WEEK_LOW", w.low, w.low, 1, 2.5, ["W"]))
+    if monthly:
+        m = monthly[-1]
+        out.append(Level("", "PREV_MONTH_HIGH", m.high, m.high, 1, 3.0, ["M"]))
+        out.append(Level("", "PREV_MONTH_LOW", m.low, m.low, 1, 3.0, ["M"]))
     return out
+
+
+def psychological_levels(price: float, pip_size: float, step_pips: int = 100, span_pips: int = 150) -> list[Level]:
+    """Round-number levels (e.g. 1.1800, 1.1900 for EUR/USD) within ``span_pips`` of price."""
+    step = step_pips * pip_size
+    first = math.floor((price - span_pips * pip_size) / step) + 1
+    last = math.floor((price + span_pips * pip_size) / step)
+    return [
+        Level("", "ROUND_NUMBER", round(k * step, 6), round(k * step, 6), 1, 1.0, ["PSY"])
+        for k in range(first, last + 1)
+    ]
 
 
 def assign_kinds(levels: list[Level], price: float) -> list[Level]:

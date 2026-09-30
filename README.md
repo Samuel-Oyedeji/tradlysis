@@ -105,15 +105,25 @@ place orders.
 
 ## How a decision is made (every completed 15-minute candle)
 
-1. Sync broker candles (M15, H1, H4, D, W). The broker's candles are authoritative.
+1. Sync broker candles (M15, H1, H4, D, W, month). The broker's candles are authoritative.
 2. **Technicals** (deterministic): EMA 20/50/200, RSI 14, ATR 14, swing structure
-   (HH/HL/LH/LL), trend per timeframe, support/resistance zones (clustered H1/H4 swings,
-   previous day and week high/low), volatility regime. Stored in `technical_snapshots`,
+   (HH/HL/LH/LL), trend per timeframe, volatility regime and support/resistance:
+   clustered H1/H4 swings, previous day/week/month high and low, and round-number
+   (psychological) levels such as 1.1800. Stored in `technical_snapshots`,
    `support_resistance` and `market_regimes`.
-3. **News**: ForexFactory calendar (event, currency, impact, forecast, actual, surprise), plus
-   Fed/ECB press releases interpreted by the LLM into a currency bias with confidence and
-   reason codes. The result gives a news risk level and a blackout flag
-   (±30 min around high-impact USD/EUR events).
+3. **News**: ForexFactory calendar (event, currency, impact, forecast, actual, surprise).
+   Python, not the LLM, turns a surprise into a currency and pair impact (for example, CPI
+   below forecast means USD bearish, so EUR/USD up; unemployment is inverted). Fed/ECB press
+   releases are interpreted by the LLM into a currency bias with confidence and reason codes.
+   The result gives a news risk level and a blackout flag (±30 min around high-impact USD/EUR
+   events).
+   *Limitation:* the free ForexFactory weekly feed normally carries forecast and previous
+   values but not the actual release, so surprise and impact only appear when an actual is
+   present. The blackout (the safety-critical part) works regardless. A paid calendar can be
+   added by implementing `CalendarProvider` in `app/news/providers/`.
+   - **Overall market regime** (deterministic): strong uptrend, strong downtrend, breakout,
+     compression, range, event risk or unclear. The trend-pullback setup suits the strong
+     trends; the analyzer reports results per regime.
 4. **Trend-pullback check** (deterministic, `app/strategy/trend_pullback.py`):
    - H4 trend sets the direction.
    - H1 trend must not oppose it.
@@ -122,7 +132,7 @@ place orders.
    - Momentum confirms: candle direction, close vs EMA20, and RSI turning.
    - Stop sits beyond the pullback plus 0.25 ATR; the target is the next opposing level
      (or 2R), capped at 4R.
-   - The setup needs R:R of at least 1.5.
+   - The setup needs R:R of at least 1:2 (Experiment #1).
 5. **Market snapshot** is built and stored in `decision_requests` (unique per candle, so a
    restart never processes a candle twice).
 6. **Decision model** via OpenRouter, schema-constrained to `BUY | SELL | WAIT` with setup,
@@ -177,7 +187,7 @@ place orders.
 - opportunities, setup candidates, model calls, decisions, and rejection/WAIT reasons
 - wins/losses, average winner and loser in R, expectancy, profit factor, max drawdown (in
   R and account %)
-- performance by setup condition, volatility and trend regime, news risk, model-confidence
+- performance by setup condition, overall market regime, volatility and trend regime, news risk, model-confidence
   bucket and direction
 - slippage, spread and LLM latency
 

@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     max_daily_loss_pct: float = 1.0
     max_drawdown_pct: float = 5.0
     max_open_trades: int = 1
-    min_risk_reward: float = 1.5
+    min_risk_reward: float = 2.0
     max_spread_pips: float = 1.5
     min_stop_pips: float = 5.0
     max_stop_pips: float = 40.0

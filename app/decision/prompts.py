@@ -20,6 +20,8 @@ The TREND_PULLBACK setup (long; short is the mirror image):
 5. No high-impact news event is imminent.
 6. The proposed trade has an acceptable risk/reward.
 
+The snapshot's "market_regime" is a deterministic classification of the overall market \
+(strong trends suit this setup; ranges, breakouts, compression and event risk usually do not). \
 The snapshot's "setup_check" contains the deterministic rule evaluation and, when present, a \
 fixed trade plan (entry, stop-loss, take-profit). You cannot change the plan, the position \
 size, or any risk limit. A separate deterministic risk engine makes the final decision and may \

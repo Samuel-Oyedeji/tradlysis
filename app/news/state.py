@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from app.news.values import currency_impact, pair_impact
+
 _IMPACT_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
 
@@ -61,7 +63,9 @@ def _relevant(currency: str, currencies: Sequence[str]) -> bool:
     return currency in currencies or currency in ("ALL", "")
 
 
-def _event_dict(e: EventView, now: datetime) -> dict[str, Any]:
+def _event_dict(e: EventView, now: datetime, currencies: Sequence[str] = ()) -> dict[str, Any]:
+    impact = currency_impact(e.title, e.surprise_direction)
+    base, quote = (list(currencies) + ["", ""])[:2]
     return {
         "title": e.title,
         "currency": e.currency,
@@ -73,6 +77,8 @@ def _event_dict(e: EventView, now: datetime) -> dict[str, Any]:
         "actual": e.actual,
         "surprise": e.surprise,
         "surprise_direction": e.surprise_direction,
+        "currency_impact": impact,
+        "pair_impact": pair_impact(e.currency, impact, base, quote),
     }
 
 
@@ -120,10 +126,10 @@ def build_news_state(
     return NewsState(
         risk=risk,
         blackout=bool(blackout_events),
-        blackout_events=[_event_dict(e, now) for e in blackout_events],
-        next_high_impact=_event_dict(next_high, now) if next_high else None,
-        upcoming=[_event_dict(e, now) for e in upcoming if _IMPACT_RANK.get(e.impact, 0) >= 2][:8],
-        recent=[_event_dict(e, now) for e in recent if _IMPACT_RANK.get(e.impact, 0) >= 2][-8:],
+        blackout_events=[_event_dict(e, now, currencies) for e in blackout_events],
+        next_high_impact=_event_dict(next_high, now, currencies) if next_high else None,
+        upcoming=[_event_dict(e, now, currencies) for e in upcoming if _IMPACT_RANK.get(e.impact, 0) >= 2][:8],
+        recent=[_event_dict(e, now, currencies) for e in recent if _IMPACT_RANK.get(e.impact, 0) >= 2][-8:],
         currency_bias=aggregate_bias(interpretations, now, currencies, bias_lookback_hours),
         calendar_fresh=calendar_fresh,
     )

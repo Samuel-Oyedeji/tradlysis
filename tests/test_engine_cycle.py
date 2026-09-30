@@ -18,6 +18,7 @@ from app.market_data.state import PriceTick
 from app.market_data.timeutil import floor_time, utcnow
 from app.news.providers.base import CalendarEvent
 from app.strategy import trend_pullback
+from app.technicals.regime import MarketRegimeLabel
 from tests.conftest import make_settings, trend_bars
 from tests.fake_broker import ACCOUNT_ID, FakeBroker
 from tests.helpers import long_state
@@ -96,6 +97,8 @@ async def test_no_setup_is_logged_as_prefilter_wait_and_deduplicated(db):
         dec = await s.scalar(select(Decision))
     assert req.snapshot["pair"] == "EUR_USD" and req.snapshot["price"]["spread_pips"] == 1.0
     assert set(req.snapshot["timeframes"]) == {"4h", "1h", "15m"}
+    assert req.snapshot["market_regime"]["label"] in {r.value for r in MarketRegimeLabel}
+    assert any(lv["source"] == "ROUND_NUMBER" for lv in req.snapshot["levels"]["support"] + req.snapshot["levels"]["resistance"])
     assert dec.source == "PREFILTER" and dec.reason_codes
     assert await count(db, TechnicalSnapshot) == 3
     # Same candle again (e.g. after a restart): not processed twice.

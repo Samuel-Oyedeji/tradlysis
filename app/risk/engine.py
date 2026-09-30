@@ -225,7 +225,7 @@ def evaluate(ctx: RiskContext, settings: Settings) -> RiskResult:
             f"{risk_pips:.1f} pips (range {settings.min_stop_pips}-{settings.max_stop_pips})",
         )
         rr = reward_dist / risk_dist if risk_dist > 0 else 0.0
-        add("MIN_RISK_REWARD", rr >= settings.min_risk_reward, f"{rr:.2f} (min {settings.min_risk_reward})")
+        add("MIN_RISK_REWARD", round(rr, 3) >= settings.min_risk_reward, f"{rr:.2f} (min {settings.min_risk_reward})")
         result.entry, result.stop_loss, result.take_profit, result.risk_reward = entry, sl, tp, round(rr, 2)
         result.direction = ctx.decision
 

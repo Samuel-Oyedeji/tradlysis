@@ -21,8 +21,8 @@ from app.market_data.timeutil import utcnow
 log = logging.getLogger(__name__)
 
 COMPONENT = "market_data"
-# Timeframes kept in the database. D and W feed the daily/weekly levels.
-SYNC_GRANULARITIES = ("M5", "M15", "H1", "H4", "D", "W")
+# Timeframes kept in the database. D, W and M (month) feed the reference levels.
+SYNC_GRANULARITIES = ("M5", "M15", "H1", "H4", "D", "W", "M")
 
 
 class MarketDataService:

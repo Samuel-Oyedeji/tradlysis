@@ -14,6 +14,7 @@ from app.news.state import NewsState
 from app.strategy.trend_pullback import StrategyResult
 from app.technicals.engine import TechnicalState, TimeframeState
 from app.technicals.levels import Level, sorted_by_distance
+from app.technicals.regime import MarketRegimeLabel
 
 SNAPSHOT_VERSION = "snapshot-v1"
 TF_KEYS = {"H4": "4h", "H1": "1h", "M15": "15m"}
@@ -67,6 +68,7 @@ def build_snapshot(
     news: NewsState,
     strategy: StrategyResult,
     decision_time: datetime,
+    market_regime: MarketRegimeLabel | None = None,
 ) -> dict[str, Any]:
     price = tick.mid
     m15_atr = tech.timeframes["M15"].atr14
@@ -101,6 +103,13 @@ def build_snapshot(
             "regime": str(tech.volatility_regime),
             "atr_h1_pips": tech.pips(tech.timeframes["H1"].atr14) if tech.timeframes["H1"].atr14 else None,
             "atr_h1_percentile": tech.atr_percentile,
+        },
+        "market_regime": None
+        if market_regime is None
+        else {
+            "label": str(market_regime),
+            "suits_trend_pullback": market_regime
+            in (MarketRegimeLabel.STRONG_UPTREND, MarketRegimeLabel.STRONG_DOWNTREND),
         },
         "regimes": {TF_KEYS[tf]: str(r) for tf, r in tech.trend_regimes.items()},
         "news": news.to_dict(),

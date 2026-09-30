@@ -18,9 +18,17 @@ from app.technicals.levels import (
     assign_kinds,
     cluster_swings,
     nearest,
+    psychological_levels,
     reference_levels,
 )
-from app.technicals.regime import TrendRegime, VolatilityRegime, trend_regime, volatility_regime
+from app.technicals.regime import (
+    MarketRegimeLabel,
+    TrendRegime,
+    VolatilityRegime,
+    classify_market_regime,
+    trend_regime,
+    volatility_regime,
+)
 from app.technicals.structure import Structure, Swing, Trend, classify_structure, find_swings, trend_direction
 
 EMA_SLOPE_LOOKBACK = 5
@@ -77,6 +85,21 @@ class TechnicalState:
     def pips(self, distance: float) -> float:
         return round(distance / self.pip_size, 1)
 
+    def market_regime(self, news_blackout: bool) -> MarketRegimeLabel:
+        h4, h1 = self.timeframes["H4"], self.timeframes["H1"]
+        prior = h1.recent_bars[-21:-1]
+        return classify_market_regime(
+            h4_trend=h4.trend,
+            h1_trend=h1.trend,
+            h4_structure_bullish=h4.structure == Structure.BULLISH,
+            h4_structure_bearish=h4.structure == Structure.BEARISH,
+            h1_close=h1.close,
+            h1_prior_high=max((b.high for b in prior), default=None),
+            h1_prior_low=min((b.low for b in prior), default=None),
+            volatility=self.volatility_regime,
+            news_blackout=news_blackout,
+        )
+
 
 def compute_timeframe_state(timeframe: str, bars: Sequence[Bar]) -> TimeframeState:
     if not bars:
@@ -124,8 +147,8 @@ def compute_technical_state(
 ) -> TechnicalState:
     """Compute the full technical state.
 
-    ``bars_by_tf`` must contain complete candles for M15, H1 and H4 (ascending); D and W are
-    optional and used for previous day/week levels.
+    ``bars_by_tf`` must contain complete candles for M15, H1 and H4 (ascending); D, W and M
+    are optional and used for previous day/week/month levels.
     """
     tfs = {tf: compute_timeframe_state(tf, bars_by_tf[tf]) for tf in ("H4", "H1", "M15")}
 
@@ -141,8 +164,8 @@ def compute_technical_state(
         tolerance,
         total_bars_by_tf={"H1": len(h1_bars), "H4": len(h4_bars)},
     )
-    refs = reference_levels(bars_by_tf.get("D", []), bars_by_tf.get("W", []))
-    levels = assign_kinds(zones + refs, price)
+    refs = reference_levels(bars_by_tf.get("D", []), bars_by_tf.get("W", []), bars_by_tf.get("M", []))
+    levels = assign_kinds(zones + refs + psychological_levels(price, pip_size), price)
 
     vol_regime, pct = volatility_regime(h1.atr_series)
     return TechnicalState(

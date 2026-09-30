@@ -128,7 +128,7 @@ def h1_alignment_key(t: ClosedTrade) -> str:
 
 def pullback_level_key(t: ClosedTrade) -> str:
     detail = _cond_detail(t.strategy, "pullback_to_level")
-    for token in ("SWING_CLUSTER", "PREV_DAY", "PREV_WEEK", "M15_EMA50"):
+    for token in ("SWING_CLUSTER", "PREV_DAY", "PREV_WEEK", "PREV_MONTH", "ROUND_NUMBER", "M15_EMA50"):
         if token in detail:
             return token
     return "other"
@@ -171,6 +171,9 @@ def compute_metrics(
 
     return {
         "opportunities": len(requests),
+        "opportunities_by_regime": dict(
+            Counter(str((r["snapshot"].get("market_regime") or {}).get("label", "UNKNOWN")) for r in requests)
+        ),
         "setup_candidates": sum(1 for r in requests if (r["strategy_result"] or {}).get("candidate")),
         "llm_calls": sum(1 for r in requests if r["llm_called"]),
         "decisions": dict(Counter(d["decision"] for d in decisions)),
@@ -192,6 +195,7 @@ def compute_metrics(
             "pullback_level": group_r(closed, pullback_level_key),
         },
         "by_market_regime": {
+            "overall": group_r(closed, lambda t: str((t.snapshot.get("market_regime") or {}).get("label", "UNKNOWN"))),
             "volatility": group_r(closed, lambda t: str(t.snapshot.get("volatility", {}).get("regime", "UNKNOWN"))),
             "h1_regime": group_r(closed, lambda t: str(t.snapshot.get("regimes", {}).get("1h", "UNKNOWN"))),
         },

@@ -28,7 +28,7 @@ from app.broker.oanda import InstrumentInfo, OandaClient
 from app.config.settings import LlmCallPolicy, Settings, get_settings
 from app.db.control import get_all_controls, set_control
 from app.db.enums import OPEN_ORDER_STATUSES, ControlKey, OrderPurpose, OrderStatus, TradeState
-from app.db.models import Decision, DecisionRequest, Order, RiskCheck, Trade
+from app.db.models import Decision, DecisionRequest, MarketRegime, Order, RiskCheck, Trade
 from app.db.session import Database
 from app.decision.openrouter import OpenRouterClient
 from app.decision.service import DecisionOutcome, DecisionService, prefilter_wait
@@ -51,8 +51,8 @@ from app.technicals.engine import compute_technical_state, persist_technical_sta
 
 log = logging.getLogger("tradlysis.engine")
 COMPONENT = "engine"
-BARS_PER_TF = {"M15": 300, "H1": 300, "H4": 300, "D": 5, "W": 3}
-SYNC_COUNTS = {"M15": 20, "H1": 10, "H4": 10, "D": 5, "W": 3}
+BARS_PER_TF = {"M15": 300, "H1": 300, "H4": 300, "D": 5, "W": 3, "M": 3}
+SYNC_COUNTS = {"M15": 20, "H1": 10, "H4": 10, "D": 5, "W": 3, "M": 2}
 
 
 @dataclass
@@ -340,13 +340,29 @@ class TradingEngine:
         async with self.db.session() as sess:
             await persist_technical_state(sess, tech)
 
-        # 5. News.
+        # 5. News, then the overall market regime (needs the news blackout flag).
         news = await self.news.current_state(now)
+        regime = tech.market_regime(news.blackout)
+        async with self.db.session() as sess:
+            sess.add(
+                MarketRegime(
+                    instrument=s.instrument,
+                    timeframe="OVERALL",
+                    computed_at=now,
+                    trend_regime=str(regime),
+                    volatility_regime=str(tech.volatility_regime),
+                    atr=tech.timeframes["H1"].atr14,
+                    atr_percentile=tech.atr_percentile,
+                    details={"h4": str(tech.timeframes["H4"].trend), "h1": str(tech.timeframes["H1"].trend)},
+                )
+            )
 
         # 6. Strategy + snapshot.
         strategy = evaluate_trend_pullback(tech, tick.bid, tick.ask, s)
         summary.candidate = strategy.candidate
-        snapshot = build_snapshot(tech=tech, tick=tick, news=news, strategy=strategy, decision_time=now)
+        snapshot = build_snapshot(
+            tech=tech, tick=tick, news=news, strategy=strategy, decision_time=now, market_regime=regime
+        )
 
         # 7. Persist the request (unique per experiment/instrument/candle => no duplicate cycles).
         request_id = await self._insert_request(candle_time, snapshot, strategy)
