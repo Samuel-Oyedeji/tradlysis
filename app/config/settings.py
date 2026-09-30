@@ -74,6 +74,8 @@ class Settings(BaseSettings):
 
     # --- Database --------------------------------------------------------------------
     database_url: str = ""
+    # Create the bot's missing tables at start-up (never alters or drops anything).
+    db_auto_create_tables: bool = True
 
     # --- Experiment ------------------------------------------------------------------
     experiment_name: str = "v1-trend-pullback-eur-usd"

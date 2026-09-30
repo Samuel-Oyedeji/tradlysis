@@ -26,27 +26,40 @@ async def check_database(s: Settings) -> str:
     s.require_database()
     from sqlalchemy import text
 
+    from app.db.bootstrap import check_tables
     from app.db.session import Database
 
     db = Database(s)
     try:
         async with db.session() as sess:
             await sess.execute(text("select 1"))
-            rows = (
+            prisma = (
                 await sess.execute(
                     text(
-                        "select migration_name from _prisma_migrations "
-                        "where finished_at is not null order by finished_at"
+                        "select count(*) from information_schema.tables "
+                        "where table_schema = current_schema() and table_name = '_prisma_migrations'"
                     )
                 )
-            ).all()
-    except Exception as exc:
-        if "_prisma_migrations" in str(exc):
-            raise RuntimeError("connected, but migrations have not been applied (run: npm run migrate:deploy)") from exc
-        raise
+            ).scalar()
+        report = await check_tables(db)
     finally:
         await db.dispose()
-    return f"connected; {len(rows)} migration(s) applied (latest: {rows[-1][0] if rows else 'none'})"
+    total = len(report.expected_tables)
+    present = total - len(report.missing_tables)
+    if report.missing_columns:
+        cols = "; ".join(f"{t}: {', '.join(c)}" for t, c in report.missing_columns.items())
+        raise RuntimeError(f"tables are missing columns, apply the Prisma migrations ({cols})")
+    if report.missing_tables:
+        hint = (
+            "they are created automatically when the engine starts"
+            if s.db_auto_create_tables
+            else "run: python -m app.db.bootstrap"
+        )
+        raise RuntimeError(
+            f"connected; {present}/{total} tables present, missing: {', '.join(report.missing_tables)} ({hint})"
+        )
+    note = "" if prisma else " (Prisma has no migration record; only needed if you use npm run migrate:deploy)"
+    return f"connected; all {total} tables present{note}"
 
 
 async def check_capital(s: Settings) -> str:
@@ -104,9 +117,23 @@ async def _first_quote(client, timeout: float = 15.0) -> str:
 async def check_openrouter(s: Settings) -> str:
     if not s.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
-    from app.decision.openrouter import OpenRouterClient
+    from app.decision.openrouter import OpenRouterClient, uses_decisions_api
 
     client = OpenRouterClient(s.openrouter_api_key, s.openrouter_base_url, s.openrouter_app_url, s.openrouter_app_name)
+    if uses_decisions_api(s.openrouter_model):
+        try:
+            d = await client.decisions(
+                model=s.openrouter_model,
+                state={"check": "connectivity"},
+                questions={"ok": {"type": "choice", "instructions": "Pick the option named yes.",
+                                  "criteria": {"yes": "Always choose this.", "no": "Never choose this."}}},
+            )
+        finally:
+            await client.aclose()
+        if not d.ok:
+            raise RuntimeError(f"model {s.openrouter_model} (Decisions API): {d.error}")
+        answer = d.answers.get("ok") or {}
+        return f"model {s.openrouter_model} answered '{answer.get('choice')}' via the Decisions API in {d.latency_ms} ms"
     schema = {
         "type": "object",
         "additionalProperties": False,

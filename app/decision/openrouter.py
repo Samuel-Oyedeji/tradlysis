@@ -1,6 +1,13 @@
-"""OpenRouter chat-completions client with schema-constrained output.
+"""OpenRouter client: the Decisions API (typed questions) and chat completions.
 
 Reference: https://openrouter.ai/docs
+
+Decision models such as TypeSafe's Jev (``typesafe/jev-1.13``) do not generate text and are only
+served on the Decisions API (``POST /api/alpha/decisions``): the request carries a ``state``
+(the data to judge) and typed ``questions`` (choice / noul / score), and the response carries a
+typed answer with probabilities per question. See :meth:`OpenRouterClient.decisions`.
+
+Other models go through chat completions (:meth:`OpenRouterClient.structured_completion`).
 
 Structured output strategy (per model, remembered after the first success):
   1. ``response_format: json_schema`` (strict) with ``provider.require_parameters=true`` so the
@@ -19,12 +26,14 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 log = logging.getLogger(__name__)
 
 MODES = ("json_schema", "json_object", "prompt")
+DECISIONS_PATH = "/api/alpha/decisions"
 # HTTP statuses that indicate "this parameter combination is not supported" rather than an outage.
 _UNSUPPORTED_STATUSES = {400, 404, 422}
 
@@ -44,6 +53,24 @@ class LlmResult:
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class DecisionsResult:
+    ok: bool
+    model: str
+    answers: dict[str, Any] = field(default_factory=dict)
+    request: dict[str, Any] | None = None
+    raw_response: dict[str, Any] | None = None
+    error: str | None = None
+    latency_ms: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+
+
+def uses_decisions_api(model: str) -> bool:
+    """TypeSafe decision models (Jev) answer typed questions and are only served on the Decisions API."""
+    return model.lstrip("~").startswith("typesafe/")
+
+
 class OpenRouterClient:
     def __init__(
         self,
@@ -53,6 +80,7 @@ class OpenRouterClient:
         app_name: str = "",
         timeout: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        decisions_url: str = "",
     ) -> None:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         if app_url:
@@ -64,9 +92,52 @@ class OpenRouterClient:
             base_url=base_url.rstrip("/"), headers=headers, timeout=timeout, transport=transport
         )
         self._mode_by_model: dict[str, str] = {}
+        base = urlsplit(base_url)
+        self.decisions_url = decisions_url or f"{base.scheme}://{base.netloc}{DECISIONS_PATH}"
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def decisions(
+        self,
+        *,
+        model: str,
+        state: Any,
+        questions: dict[str, dict[str, Any]],
+        session_id: str | None = None,
+    ) -> DecisionsResult:
+        """Ask a decision model typed questions about ``state``. Never raises for API errors."""
+        body: dict[str, Any] = {"model": model, "state": state, "questions": questions}
+        if session_id:
+            body["session_id"] = session_id[:256]
+        result = DecisionsResult(ok=False, model=model, request=body)
+        if not self.enabled:
+            result.error = "OPENROUTER_API_KEY is not configured"
+            return result
+        t0 = time.monotonic()
+        try:
+            resp = await self._client.post(self.decisions_url, json=body)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            result.error = f"transport error: {exc!r}"
+            result.latency_ms = int((time.monotonic() - t0) * 1000)
+            return result
+        result.latency_ms = int((time.monotonic() - t0) * 1000)
+        data = _json_or_text(resp)
+        result.raw_response = data
+        if resp.status_code != 200 or "error" in data:
+            err = data.get("error") if isinstance(data.get("error"), dict) else data
+            result.error = f"HTTP {resp.status_code}: {json.dumps(err)[:500]}"
+            return result
+        answers = data.get("answers")
+        if not isinstance(answers, dict):
+            result.error = "response has no answers"
+            return result
+        usage = data.get("usage") or {}
+        result.prompt_tokens = usage.get("input_tokens")
+        result.completion_tokens = usage.get("output_tokens")
+        result.answers = answers
+        result.ok = True
+        return result
 
     async def structured_completion(
         self,

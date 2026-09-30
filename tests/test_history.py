@@ -62,7 +62,7 @@ def test_hypothetical_sell_side():
 def req(**kw) -> DecisionRequest:
     base = dict(id=1, experiment="x", instrument="EUR_USD", candle_time=T0, created_at=T0 + timedelta(minutes=15),
                 snapshot=SNAPSHOT, trade_plan=PLAN, strategy_result=STRATEGY, llm_called=True,
-                model="typesafe/jev-1.13", prompt_version="decision-v2")
+                model="typesafe/jev-1.13", prompt_version="decision-v3")
     base.update(kw)
     return DecisionRequest(**base)
 

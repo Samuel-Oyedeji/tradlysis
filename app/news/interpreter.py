@@ -1,4 +1,9 @@
-"""LLM interpretation of central-bank / macro news into a structured currency bias."""
+"""LLM interpretation of central-bank / macro news into a structured currency bias.
+
+With a decision model (Jev) the article is the ``state`` and two choice questions are asked: the
+policy tone (HAWKISH / DOVISH / NEUTRAL, whose probability is the confidence) and the main theme
+(recorded as the reason code). Chat models get a system prompt and a JSON-schema response.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.decision.openrouter import LlmResult, OpenRouterClient
+from app.decision.openrouter import DecisionsResult, LlmResult, OpenRouterClient, uses_decisions_api
 
-NEWS_PROMPT_VERSION = "news-v1"
+NEWS_PROMPT_VERSION = "news-v2"
 
 
 class Tone(StrEnum):
@@ -92,6 +97,72 @@ def build_messages(currency: str, title: str, summary: str | None, published: st
     ]
 
 
+TONE_INSTRUCTIONS = """The state is one central-bank or economic news item for the stated currency, \
+used by an FX research system. Interpret the language only. Classify the monetary-policy tone of \
+the item for the stated currency's central bank, comparing against what markets most likely \
+expected when the text makes that possible."""
+
+TONE_CRITERIA = {
+    "HAWKISH": "Points to tighter policy: rate hikes or rates held higher for longer, inflation concern, "
+    "balance-sheet reduction. Supportive of the currency.",
+    "DOVISH": "Points to looser policy: rate cuts, easing inflation, growth or labour weakness, balance-sheet "
+    "easing. Negative for the currency.",
+    "NEUTRAL": "Balanced or as expected, or not about monetary policy or the currency.",
+}
+
+THEME_INSTRUCTIONS = "Which theme best describes the policy content of this news item for the stated currency?"
+
+THEME_CRITERIA = {
+    "RATE_HIKE_SIGNAL": "Signals or delivers a rate increase.",
+    "RATE_CUT_SIGNAL": "Signals or delivers a rate cut.",
+    "RATES_ON_HOLD": "Rates unchanged with no clear signal of the next move.",
+    "INFLATION_CONCERN": "Inflation too high or rising is the main concern.",
+    "INFLATION_EASING": "Inflation falling or under control is the main message.",
+    "GROWTH_STRONG": "Economic growth is strong.",
+    "GROWTH_WEAK": "Economic growth is weak or slowing.",
+    "LABOR_STRONG": "The labour market is strong.",
+    "LABOR_WEAK": "The labour market is weakening.",
+    "BALANCE_SHEET_TIGHTENING": "Balance-sheet reduction or quantitative tightening.",
+    "BALANCE_SHEET_EASING": "Asset purchases or quantitative easing.",
+    "FINANCIAL_STABILITY": "Financial stability or banking-sector concerns.",
+    "NOT_POLICY_RELEVANT": "Not relevant to monetary policy or the currency (administrative, personnel, events).",
+    "OTHER": "Policy-relevant but none of the above.",
+}
+
+TONE_BIAS = {Tone.HAWKISH: Bias.BULLISH, Tone.DOVISH: Bias.BEARISH, Tone.NEUTRAL: Bias.NEUTRAL}
+IRRELEVANT_MAX_CONFIDENCE = 0.2
+
+
+def build_news_questions() -> dict[str, dict]:
+    return {
+        "tone": {"type": "choice", "instructions": TONE_INSTRUCTIONS, "criteria": TONE_CRITERIA},
+        "theme": {"type": "choice", "instructions": THEME_INSTRUCTIONS, "criteria": THEME_CRITERIA},
+    }
+
+
+def parse_news_answers(answers: dict, currency: str) -> dict:
+    """Map Decisions API answers onto the interpretation schema (validated afterwards)."""
+    tone_answer = answers.get("tone") or {}
+    theme_answer = answers.get("theme") or {}
+    tone = Tone(str(tone_answer.get("choice", "")).upper())
+    theme = NewsReason(str(theme_answer.get("choice", "")).upper())
+    probabilities = {str(k).upper(): v for k, v in (tone_answer.get("probabilities") or {}).items()}
+    confidence = probabilities.get(tone, tone_answer.get("confidence"))
+    if confidence is None:
+        raise ValueError("tone answer carries no probability or confidence")
+    confidence = float(confidence)
+    if theme == NewsReason.NOT_POLICY_RELEVANT:
+        tone, confidence = Tone.NEUTRAL, min(confidence, IRRELEVANT_MAX_CONFIDENCE)
+    return {
+        "currency": currency.upper(),
+        "tone": tone,
+        "currency_bias": TONE_BIAS[tone],
+        "confidence": confidence,
+        "reason_codes": [theme],
+        "summary": f"{tone} for {currency.upper()} (p={confidence:.2f}); theme {theme}",
+    }
+
+
 async def interpret_article(
     client: OpenRouterClient,
     model: str,
@@ -99,8 +170,20 @@ async def interpret_article(
     title: str,
     summary: str | None,
     published: str | None,
-) -> tuple[NewsInterpretationOut | None, LlmResult, str | None]:
-    """Returns (validated interpretation or None, raw LLM result, validation error)."""
+) -> tuple[NewsInterpretationOut | None, LlmResult | DecisionsResult, str | None]:
+    """Returns (validated interpretation or None, raw model result, validation error)."""
+    if uses_decisions_api(model):
+        state = {"currency": currency, "published": published or "unknown", "title": title}
+        if summary:
+            state["text"] = summary[:3000]
+        decided = await client.decisions(model=model, state=state, questions=build_news_questions())
+        if not decided.ok:
+            return None, decided, decided.error
+        try:
+            return NewsInterpretationOut.model_validate(parse_news_answers(decided.answers, currency)), decided, None
+        except (ValidationError, ValueError) as exc:
+            return None, decided, str(exc)[:1000]
+
     result = await client.structured_completion(
         model=model,
         messages=build_messages(currency, title, summary, published),

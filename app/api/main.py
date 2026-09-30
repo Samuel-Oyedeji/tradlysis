@@ -9,6 +9,7 @@ Run with ``uvicorn app.api.main:app --host 0.0.0.0 --port 8000``.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from bisect import bisect_left
 from collections import Counter
@@ -26,6 +27,7 @@ from sqlalchemy import desc, select
 
 from app.api import history
 from app.config.settings import Settings, get_settings
+from app.db.bootstrap import auto_create_tables
 from app.db.control import get_all_controls, set_control
 from app.db.enums import ControlKey
 from app.db.models import (
@@ -43,6 +45,7 @@ from app.db.models import (
 from app.db.session import Database
 from app.market_data.timeutil import utcnow
 
+log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 HEARTBEAT_MAX_AGE_SECONDS = 60
 CSRF_HEADER_VALUE = "tradlysis"
@@ -65,6 +68,11 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.db = db or Database(settings)
+        if db is None:
+            try:
+                await auto_create_tables(app.state.db, settings)
+            except Exception:
+                log.exception("could not check/create database tables")
         yield
         await app.state.db.dispose()
 
