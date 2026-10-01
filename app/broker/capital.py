@@ -71,6 +71,10 @@ class CapitalError(Exception):
         super().__init__(message or f"Capital.com HTTP {status_code}: {self.error_code or body}")
 
 
+class CapitalDataError(CapitalError):
+    """The broker answered, but the data is unusable (e.g. an account without a balance)."""
+
+
 class CapitalTransportError(Exception):
     """The request did not produce a response (timeout, connection reset, ...)."""
 
@@ -451,9 +455,16 @@ def account_state_from_api(a: dict[str, Any]) -> AccountState:
     Capital.com's ``balance`` object: ``balance`` = equity (deposit + open P/L), ``deposit`` =
     cash balance, ``profitLoss`` = open P/L, ``available`` = funds available for new positions.
     """
-    bal = a.get("balance") or {}
-    equity = Decimal(str(bal.get("balance", "0")))
-    available = Decimal(str(bal.get("available", "0")))
+    bal = a.get("balance")
+    if not isinstance(bal, dict) or bal.get("balance") is None:
+        raise CapitalDataError(0, a, f"account {a.get('accountId')} was returned without a balance")
+    try:
+        equity = Decimal(str(bal["balance"]))
+        available = Decimal(str(bal.get("available", "0")))
+        Decimal(str(bal.get("deposit", equity)))
+        Decimal(str(bal.get("profitLoss", "0")))
+    except ArithmeticError as exc:  # decimal.InvalidOperation
+        raise CapitalDataError(0, a, f"account {a.get('accountId')} has a non-numeric balance") from exc
     return AccountState(
         account_id=str(a.get("accountId", "")),
         currency=str(a.get("currency", "")),

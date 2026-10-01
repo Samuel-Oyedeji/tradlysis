@@ -315,6 +315,38 @@ async def test_account_view_and_breakers(db, broker, parts):
         assert (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"] is True
 
 
+async def test_bad_account_readings_never_trip_breakers(db, broker, parts):
+    _, _, reconciler = parts
+    assert await reconciler.reconcile_once()
+    good = reconciler.account
+    assert good.nav == Decimal("100000.0")
+
+    broker.nav = 0.0  # Capital.com hiccup: equity reported as 0
+    assert await reconciler.reconcile_once()
+    broker.nav = 100000.0
+    broker.account_without_balance = True  # ... or no balance at all
+    assert await reconciler.reconcile_once()
+
+    assert reconciler.account is good, "the last valid reading is kept"
+    async with db.session() as s:
+        assert not (await get_control(s, ControlKey.DAILY_LOSS_BREAKER) or {}).get("tripped")
+        assert not (await get_control(s, ControlKey.DRAWDOWN_BREAKER) or {}).get("tripped")
+        assert (await get_control(s, ControlKey.PEAK_NAV))["value"] == "100000.0"
+        assert (await get_control(s, ControlKey.DAY_START_NAV))["value"] == "100000.0"
+    [ev] = await events(db, "ACCOUNT_READING_IGNORED")  # one warning per run of bad readings, not a critical
+    assert ev.level == "WARNING"
+    assert not await events(db, "DRAWDOWN_BREAKER") and not await events(db, "DAILY_LOSS_BREAKER")
+
+    # Valid readings resume normal behaviour, including real breaker trips.
+    broker.account_without_balance = False
+    broker.nav = 98500.0
+    assert await reconciler.reconcile_once()
+    assert reconciler.account.nav == Decimal("98500.0")
+    assert len(await events(db, "ACCOUNT_READING_RECOVERED")) == 1
+    async with db.session() as s:
+        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is True
+
+
 async def test_session_expiry_relogs_in(db, broker, parts):
     _, _, reconciler = parts
     assert await reconciler.reconcile_once()
