@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Tradlysis · Analysis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<style>
+.page-h .acts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.funnel { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.funnel .step { padding: 14px 16px; min-width: 0; }
+.funnel .step + .step { border-left: 1px solid var(--grid); }
+.funnel .k { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.funnel .v { font: 600 22px/1.2 var(--mono); margin-top: 4px; }
+.funnel .s { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; margin-top: 16px; }
+.reasons { list-style: none; margin: 0; padding: 0; }
+.reasons li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 16px; border-bottom: 1px solid var(--grid); font-size: 13px; }
+.reasons li:last-child { border-bottom: 0; }
+.reasons-h { padding: 10px 16px 4px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
+.t tr.group td { background: var(--panel-2); font-weight: 600; font-size: 12px; color: var(--ink-2); }
+.gap { margin-top: 16px; }
+@media (max-width: 1100px) { .funnel { grid-template-columns: repeat(3, minmax(0, 1fr)); } .funnel .step:nth-child(4) { border-left: 0; } .funnel .step:nth-child(n+4) { border-top: 1px solid var(--grid); } }
+@media (max-width: 899px) {
+  .two { grid-template-columns: minmax(0, 1fr); }
+  .funnel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .funnel .step:nth-child(odd) { border-left: 0; } .funnel .step:nth-child(n+3) { border-top: 1px solid var(--grid); }
+  .funnel .v { font-size: 20px; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="side" id="side"></aside>
+  <div>
+    <header class="topbar" id="topbar"></header>
+    <main class="main">
+      <div class="page-h">
+        <h1>Experiment analysis</h1>
+        <div class="acts"><span class="muted" id="asof"></span><button class="btn primary" id="btn-run" type="button">Run analysis now</button></div>
+      </div>
+      <div class="banner" id="banner" role="alert"></div>
+
+      <section class="tiles" aria-label="Results so far">
+        <div class="panel tile"><div class="label">Closed trades</div><div class="value" id="t-trades">–</div><div class="foot" id="t-trades-foot"></div></div>
+        <div class="panel tile"><div class="label">Win rate</div><div class="value" id="t-win">–</div><div class="foot" id="t-win-foot"></div></div>
+        <div class="panel tile"><div class="label">Average result per trade</div><div class="value" id="t-avg">–</div><div class="foot" id="t-avg-foot"></div></div>
+        <div class="panel tile"><div class="label">Realised P/L</div><div class="value" id="t-pl">–</div><div class="foot" id="t-pl-foot"></div></div>
+      </section>
+
+      <section class="panel" style="margin-top:16px" aria-labelledby="h-funnel">
+        <div class="panel-h"><h2 id="h-funnel">From candle to trade</h2><span class="aside" id="since"></span></div>
+        <div class="funnel" id="funnel"><div class="empty">No report yet.</div></div>
+      </section>
+
+      <div class="two">
+        <section class="panel">
+          <div class="panel-h"><h2>Why trades didn't happen</h2></div>
+          <div class="panel-b flush" id="reasons"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-h"><h2>Execution &amp; health</h2></div>
+          <div class="panel-b" id="execution"></div>
+        </section>
+      </div>
+
+      <section class="panel gap">
+        <div class="panel-h"><h2>Results by condition</h2><span class="aside">closed trades only · R = result ÷ risk taken</span></div>
+        <div class="panel-b flush scroll-x" id="groups"></div>
+      </section>
+
+      <section class="panel gap">
+        <div class="panel-h"><h2>Timeline · what has run</h2>
+          <div class="seg" role="group" aria-label="Period"><button type="button" data-days="7" aria-pressed="false">7 days</button><button type="button" data-days="30" aria-pressed="true">30 days</button><button type="button" data-days="90" aria-pressed="false">90 days</button></div>
+        </div>
+        <div class="panel-b flush scroll-x" id="timeline"></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="/assets/app.js"></script>
+<script>
+const {esc, fmt, day, short, pretty, signed, api} = T;
+const $ = (id) => document.getElementById(id);
+let days = 30;
+T.renderShell("analysis");
+T.refreshStatus();
+
+const num = (n) => `<span class="num">${n ?? 0}</span>`;
+const pct = (part, whole) => whole ? `${fmt(part / whole * 100, 0)}% of previous` : "–";
+
+function renderReport(r) {
+  if (!r) {
+    $("asof").textContent = "No report yet";
+    ["t-trades", "t-win", "t-avg", "t-pl"].forEach(id => $(id).textContent = "–");
+    $("funnel").innerHTML = `<div class="empty">No report yet. Press “Run analysis now”.</div>`;
+    $("reasons").innerHTML = $("groups").innerHTML = "";
+    $("execution").innerHTML = "";
+    return;
+  }
+  const m = r.metrics, c = m.closed_trades || {}, d = m.decisions || {}, o = m.orders || {};
+  $("asof").textContent = `As of ${short(r.created_at)}`;
+  $("since").textContent = m.period_start ? `since ${day(m.period_start)}` : "";
+
+  $("t-trades").textContent = c.trades || 0;
+  $("t-trades-foot").textContent = c.trades ? `${c.wins} won · ${c.losses} lost · ${m.open_trades || 0} open` : `${m.open_trades || 0} open`;
+  $("t-win").textContent = c.win_rate == null ? "–" : `${fmt(c.win_rate * 100, 0)}%`;
+  $("t-win-foot").textContent = c.profit_factor == null ? "" : `profit factor ${fmt(c.profit_factor)}`;
+  $("t-avg").innerHTML = c.avg_r == null ? "–" : signed(c.avg_r, 2, "R");
+  $("t-avg-foot").textContent = c.total_r == null ? "" : `total ${c.total_r > 0 ? "+" : ""}${fmt(c.total_r)}R · winner ${fmt(c.avg_winner_r)}R · loser ${fmt(c.avg_loser_r)}R`;
+  $("t-pl").innerHTML = signed(m.realized_pl ?? 0, 2);
+  $("t-pl-foot").textContent = `max drawdown ${c.max_drawdown_r == null ? "–" : fmt(c.max_drawdown_r) + "R"} · account ${m.account_max_drawdown_pct == null ? "–" : fmt(m.account_max_drawdown_pct) + "%"}`;
+
+  const signals = (d.BUY || 0) + (d.SELL || 0);
+  const steps = [
+    ["15-min cycles", m.opportunities, "every completed candle"],
+    ["Setups found", m.setup_candidates, pct(m.setup_candidates, m.opportunities)],
+    ["Model reviews", m.llm_calls, pct(m.llm_calls, m.setup_candidates)],
+    ["Trade signals", signals, `${d.BUY || 0} buy · ${d.SELL || 0} sell`],
+    ["Risk approved", m.risk_approved, `of ${m.risk_checks} checked`],
+    ["Orders filled", o.FILLED || 0, Object.entries(o).filter(([k]) => k !== "FILLED").map(([k, v]) => `${v} ${pretty(k)}`).join(" · ") || "no other outcomes"],
+  ];
+  $("funnel").innerHTML = steps.map(([k, v, s]) => `<div class="step"><div class="k">${esc(k)}</div><div class="v">${v ?? 0}</div><div class="s">${esc(s)}</div></div>`).join("");
+
+  const list = (title, obj) => {
+    const items = Object.entries(obj || {}).slice(0, 8);
+    return `<div class="reasons-h">${esc(title)}</div>` + (items.length
+      ? `<ul class="reasons">${items.map(([k, v]) => `<li><span>${esc(pretty(k))}</span>${num(v)}</li>`).join("")}</ul>`
+      : `<div class="empty" style="padding-top:6px">None yet.</div>`);
+  };
+  $("reasons").innerHTML = list("Model or rules said wait", m.wait_reasons) + list("Risk engine blocked", m.rejection_reasons);
+
+  const e = m.execution || {};
+  const kv = (k, v) => `<dt>${esc(k)}</dt><dd>${v}</dd>`;
+  const closeReasons = Object.entries(m.close_reasons || {}).map(([k, v]) => `${v} ${pretty(k)}`).join(" · ") || "–";
+  $("execution").innerHTML = `<dl class="kv">
+    ${kv("Slippage (avg / worst)", e.avg_slippage_pips == null ? "–" : `<span class="num">${fmt(e.avg_slippage_pips)} / ${fmt(e.max_slippage_pips)} pips</span>`)}
+    ${kv("Spread at decision (avg / max)", e.avg_spread_pips_at_decision == null ? "–" : `<span class="num">${fmt(e.avg_spread_pips_at_decision)} / ${fmt(e.max_spread_pips_at_decision)} pips</span>`)}
+    ${kv("Model response time", e.avg_llm_latency_ms == null ? "–" : `<span class="num">${e.avg_llm_latency_ms} ms</span>`)}
+    ${kv("Invalid model answers", num(m.invalid_model_responses))}
+    ${kv("How trades closed", esc(closeReasons))}
+    ${kv("Positions not opened by the bot", num(m.unexpected_trades))}
+  </dl>`;
+
+  const groups = [
+    ["Direction", m.by_direction],
+    ["Overall market", m.by_market_regime?.overall],
+    ["Volatility", m.by_market_regime?.volatility],
+    ["1h trend", m.by_market_regime?.h1_regime],
+    ["Model confidence", m.by_confidence],
+    ["News risk", m.by_news_risk],
+    ["1h alignment", m.by_setup_condition?.h1_alignment],
+    ["Pullback level", m.by_setup_condition?.pullback_level],
+  ].filter(([, g]) => g && Object.keys(g).length);
+  $("groups").innerHTML = groups.length ? `<table class="t"><thead><tr><th>Condition</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Average</th><th class="num">Total</th></tr></thead><tbody>
+    ${groups.map(([name, g]) => `<tr class="group"><td colspan="5">${esc(name)}</td></tr>` + Object.entries(g).map(([k, s]) => `<tr><td>${esc(pretty(k))}</td><td class="num">${s.trades}</td><td class="num">${s.win_rate == null ? "–" : fmt(s.win_rate * 100, 0) + "%"}</td><td class="num">${signed(s.avg_r, 2, "R")}</td><td class="num">${signed(s.total_r, 2, "R")}</td></tr>`).join("")).join("")}
+  </tbody></table>` : `<div class="empty">No closed trades yet. This fills in as trades finish.</div>`;
+}
+
+function renderTimeline(rows) {
+  if (!rows || !rows.length) { $("timeline").innerHTML = `<div class="empty">Nothing has run in this period yet.</div>`; return; }
+  $("timeline").innerHTML = `<table class="t"><thead><tr><th>Day (UTC)</th><th class="num">Cycles</th><th class="num">Setups</th><th class="num">Model reviews</th><th class="num">Signals</th><th class="num">Approved</th><th class="num">Opened</th><th class="num">Closed</th><th class="num">Result</th><th class="num">P/L</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td>${esc(day(r.day + "T12:00:00Z"))}</td><td class="num">${r.cycles}</td><td class="num">${r.setups}</td><td class="num">${r.model_calls}</td><td class="num">${r.signals}</td><td class="num">${r.approved}</td><td class="num">${r.opened}</td><td class="num">${r.closed ? `${r.closed} <span class="muted">(${r.wins} won)</span>` : 0}</td><td class="num">${r.closed ? signed(r.total_r, 2, "R") : "–"}</td><td class="num">${r.closed ? signed(r.realized_pl, 2) : "–"}</td></tr>`).join("")}
+  </tbody></table>`;
+}
+
+async function load() {
+  try {
+    const [latest, tl] = await Promise.all([api("/api/analysis/latest"), api(`/api/analysis/timeline?days=${days}`)]);
+    renderReport(latest.report); renderTimeline(tl.days);
+    $("banner").style.display = "none";
+  } catch (e) {
+    $("banner").textContent = `Couldn't load the analysis: ${e.message}`; $("banner").style.display = "block";
+  }
+}
+
+$("btn-run").onclick = async () => {
+  const b = $("btn-run"); b.disabled = true; b.textContent = "Running…";
+  try { renderReport((await api("/api/analysis/run", {method: "POST", body: "{}"})).report); await load(); }
+  catch (e) { alert(`The analysis didn't run: ${e.message}`); }
+  finally { b.disabled = false; b.textContent = "Run analysis now"; }
+};
+document.querySelectorAll(".seg button").forEach(b => b.onclick = () => {
+  days = Number(b.dataset.days);
+  document.querySelectorAll(".seg button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  load();
+});
+
+load(); setInterval(() => { T.refreshStatus(); load(); }, 60000);
+</script>
+</body>
+</html>

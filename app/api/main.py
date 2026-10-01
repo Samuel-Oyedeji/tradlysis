@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, select
+from sqlalchemy import Date, cast, desc, func, select
 
 from app.api import history
 from app.config.settings import Settings, get_settings
@@ -117,6 +117,10 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @app.get("/", include_in_schema=False)
     async def dashboard(_: str = Depends(require_auth)) -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/analysis", include_in_schema=False)
+    async def analysis_page(_: str = Depends(require_auth)) -> FileResponse:
+        return FileResponse(STATIC_DIR / "analysis.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/history", include_in_schema=False)
     @app.get("/history/{item_id}", include_in_schema=False)
@@ -464,6 +468,85 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         if row is None:
             return {"report": None}
         return {"report": {"created_at": row.created_at.isoformat(), "metrics": row.metrics}}
+
+    @app.post("/api/analysis/run", dependencies=[Depends(require_csrf)])
+    async def run_analysis(_: str = Depends(require_auth), database: Database = Depends(get_db)) -> dict[str, Any]:
+        """Compute and store a fresh report now (what ``python -m app.experiments.analyzer --once`` does)."""
+        from app.experiments.analyzer import run_once
+
+        metrics = await run_once(database, settings)
+        return {"report": {"created_at": utcnow().isoformat(), "metrics": metrics}}
+
+    @app.get("/api/analysis/timeline")
+    async def analysis_timeline(
+        days: int = Query(default=30, ge=1, le=365),
+        _: str = Depends(require_auth),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        """What the experiment did per UTC day: cycles, setups, model calls, signals, approvals, trades."""
+        exp = settings.experiment_name
+        since = utcnow() - timedelta(days=days)
+
+        def utc_day(col):
+            return cast(func.timezone("UTC", col), Date).label("day")
+
+        req_day = utc_day(DecisionRequest.candle_time)
+        in_scope = (DecisionRequest.experiment == exp, DecisionRequest.candle_time >= since)
+        out: dict[str, dict[str, Any]] = {}
+
+        def row(day) -> dict[str, Any]:
+            key = day.isoformat()
+            return out.setdefault(key, {
+                "day": key, "cycles": 0, "setups": 0, "model_calls": 0, "signals": 0, "approved": 0,
+                "opened": 0, "closed": 0, "wins": 0, "total_r": 0.0, "realized_pl": 0.0,
+            })
+
+        async with database.session() as s:
+            for day, cycles, setups, calls in await s.execute(
+                select(
+                    req_day,
+                    func.count(),
+                    func.count().filter(DecisionRequest.strategy_result["candidate"].astext == "true"),
+                    func.count().filter(DecisionRequest.llm_called.is_(True)),
+                ).where(*in_scope).group_by(req_day)
+            ):
+                r = row(day)
+                r.update(cycles=cycles, setups=setups, model_calls=calls)
+            for day, signals in await s.execute(
+                select(req_day, func.count())
+                .join(Decision, Decision.request_id == DecisionRequest.id)
+                .where(*in_scope, Decision.decision.in_(["BUY", "SELL"]))
+                .group_by(req_day)
+            ):
+                row(day)["signals"] = signals
+            for day, approved in await s.execute(
+                select(req_day, func.count())
+                .join(RiskCheck, RiskCheck.request_id == DecisionRequest.id)
+                .where(*in_scope, RiskCheck.approved.is_(True))
+                .group_by(req_day)
+            ):
+                row(day)["approved"] = approved
+            open_day = utc_day(Trade.open_time)
+            for day, opened in await s.execute(
+                select(open_day, func.count())
+                .where(Trade.experiment == exp, Trade.open_time >= since)
+                .group_by(open_day)
+            ):
+                row(day)["opened"] = opened
+            close_day = utc_day(Trade.close_time)
+            for day, closed, wins, total_r, pl in await s.execute(
+                select(
+                    close_day,
+                    func.count(),
+                    func.count().filter(Trade.r_multiple > 0),
+                    func.coalesce(func.sum(Trade.r_multiple), 0),
+                    func.coalesce(func.sum(Trade.realized_pl), 0),
+                )
+                .where(Trade.experiment == exp, Trade.close_time.is_not(None), Trade.close_time >= since)
+                .group_by(close_day)
+            ):
+                row(day).update(closed=closed, wins=wins, total_r=round(float(total_r), 3), realized_pl=round(float(pl), 2))
+        return {"days": sorted(out.values(), key=lambda r: r["day"], reverse=True)}
 
     # ------------------------------------------------------------------ controls
 

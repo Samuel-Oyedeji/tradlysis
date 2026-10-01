@@ -74,3 +74,49 @@ async def test_shared_assets_served(client):
     assert js.status_code == 200 and "renderShell" in js.text
     page = (await client.get("/", auth=AUTH)).text
     assert '/assets/app.css' in page
+
+
+async def test_analysis_page_run_and_timeline(client, db):
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from app.db.models import Decision, DecisionRequest, RiskCheck, Trade
+
+    exp = make_settings().experiment_name
+    today = datetime.now(UTC).replace(hour=10, minute=0, second=0, microsecond=0)
+    yesterday = today - timedelta(days=1)
+    async with db.session() as s:
+        for i, t in enumerate([yesterday, yesterday + timedelta(minutes=15), today]):
+            candidate = i == 2
+            r = DecisionRequest(experiment=exp, instrument="EUR_USD", candle_time=t, snapshot={},
+                                strategy_result={"candidate": candidate}, llm_called=candidate)
+            s.add(r)
+            await s.flush()
+            d = Decision(request_id=r.id, source="LLM" if candidate else "PREFILTER",
+                         decision="BUY" if candidate else "WAIT", reason_codes=["NO_SETUP"], confidence=0.8)
+            s.add(d)
+            await s.flush()
+            if candidate:
+                s.add(RiskCheck(request_id=r.id, decision_id=d.id, approved=True, checks=[], rejection_reasons=[]))
+        s.add(Trade(broker_trade_id="d1", experiment=exp, instrument="EUR_USD", direction="BUY", initial_units=1000,
+                    current_units=0, open_price=1.1, open_time=today, state="CLOSED", close_time=today + timedelta(hours=1),
+                    close_price=1.104, realized_pl=Decimal("4"), r_multiple=2.0, initial_risk_price=0.002))
+
+    page = await client.get("/analysis", auth=AUTH)
+    assert page.status_code == 200 and "Experiment analysis" in page.text
+    assert (await client.get("/analysis")).status_code == 401
+
+    tl = (await client.get("/api/analysis/timeline?days=7", auth=AUTH)).json()["days"]
+    assert [d["day"] for d in tl] == [today.date().isoformat(), yesterday.date().isoformat()]
+    t0, t1 = tl
+    assert (t0["cycles"], t0["setups"], t0["model_calls"], t0["signals"], t0["approved"]) == (1, 1, 1, 1, 1)
+    assert (t0["opened"], t0["closed"], t0["wins"], t0["total_r"], t0["realized_pl"]) == (1, 1, 1, 2.0, 4.0)
+    assert (t1["cycles"], t1["setups"], t1["signals"], t1["closed"]) == (2, 0, 0, 0)
+
+    assert (await client.post("/api/analysis/run", auth=AUTH)).status_code == 403  # CSRF header required
+    run = await client.post("/api/analysis/run", auth=AUTH, headers=CSRF)
+    assert run.status_code == 200
+    m = run.json()["report"]["metrics"]
+    assert m["opportunities"] == 3 and m["setup_candidates"] == 1 and m["closed_trades"]["trades"] == 1
+    latest = (await client.get("/api/analysis/latest", auth=AUTH)).json()["report"]
+    assert latest["metrics"]["opportunities"] == 3  # the run was stored, like the analyzer does

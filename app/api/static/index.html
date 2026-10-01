@@ -23,6 +23,9 @@
 .news-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--grid); font-size: 13px; }
 .news-row:last-child { border-bottom: 0; }
 .news-row .when { font: 12px var(--mono); color: var(--ink-2); }
+/* News shows its first few items; the rest scroll inside the panel so system events stay in view. */
+#news { position: relative; overflow-y: auto; overscroll-behavior: contain; }
+#news .sub { border-top: 1px solid var(--grid); background: var(--panel); }
 svg#nav-chart { height: 260px; }
 @media (max-width: 899px) {
   .ov { grid-template-columns: minmax(0, 1fr); }
@@ -106,9 +109,10 @@ svg#nav-chart { height: 260px; }
           <section class="panel" id="p-summary">
             <div class="panel-h"><h2>Experiment results</h2><span class="aside" id="summary-when"></span></div>
             <div class="panel-b" id="analysis"><span class="muted">No report yet. The analyzer writes one every hour.</span></div>
+            <div class="panel-b" style="padding-top:0"><a class="btn block" href="/analysis">Experiment analysis →</a></div>
           </section>
           <section class="panel" id="p-news">
-            <div class="panel-h"><h2>News · EUR &amp; USD</h2><span class="aside">next 48h</span></div>
+            <div class="panel-h"><h2>News · EUR &amp; USD</h2><span class="aside" id="news-aside">next 48h</span></div>
             <div class="panel-b flush" id="news"></div>
           </section>
           <section class="panel" id="p-events">
@@ -128,6 +132,7 @@ svg#nav-chart { height: 260px; }
 const {esc, fmt, dt, short, pretty, signed, codes, api} = T;
 const $ = (id) => document.getElementById(id);
 let onlyLlm = false, minLevel = "WARNING", accountSeries = [];
+const NEWS_VISIBLE = 5;
 T.renderShell("overview");
 
 async function refresh() {
@@ -264,10 +269,22 @@ function renderNews(n) {
   if (!n || n.__error) { $("news").innerHTML = `<div class="empty">News unavailable.</div>`; return; }
   const ev = (n.events || []).map(e => `<div class="news-row"><div class="when">${esc(short(e.time))}</div><div><span class="dot ${e.impact === "HIGH" ? "d-bad" : "d-warn"}"></span> <b>${esc(e.currency)}</b> ${esc(e.title)} <span class="muted">· ${e.impact === "HIGH" ? "high" : "medium"} impact</span><div class="codes">forecast ${esc(e.forecast ?? "–")} · previous ${esc(e.previous ?? "–")}${e.actual ? " · actual " + esc(e.actual) : ""}</div></div></div>`).join("");
   const it = (n.interpretations || []).slice(0, 3).map(i => `<div class="news-row"><div class="when">${esc(i.currency)}</div><div><b>${esc(pretty(i.bias))}</b> <span class="muted">(${esc(pretty(i.tone))}, ${fmt(i.confidence)})</span><div class="codes">${esc(i.summary || "")}</div></div></div>`).join("");
-  $("news").innerHTML = (ev || `<div class="empty">No medium or high-impact events in the next 48 hours.</div>`) + (it ? `<div class="panel-h" style="border-top:1px solid var(--grid)"><h2>Central-bank reads</h2></div>${it}` : "");
+  const box = $("news"), keep = box.scrollTop;
+  box.innerHTML = (ev || `<div class="empty">No medium or high-impact events in the next 48 hours.</div>`) + (it ? `<div class="panel-h sub"><h2>Central-bank reads</h2></div>${it}` : "");
+  // Show the first NEWS_VISIBLE items; anything beyond scrolls inside the panel.
+  const rows = box.querySelectorAll(".news-row");
+  if (rows.length > NEWS_VISIBLE) {
+    const last = rows[NEWS_VISIBLE - 1];
+    box.style.maxHeight = `${last.offsetTop + last.offsetHeight}px`;
+    box.scrollTop = keep;
+    $("news-aside").textContent = `${rows.length} items · scroll`;
+  } else {
+    box.style.maxHeight = "";
+    $("news-aside").textContent = "next 48h";
+  }
 }
 function renderAnalysis(r) {
-  if (!r) { $("analysis").innerHTML = `<span class="muted">No report yet. The analyzer writes one every hour.</span>`; $("summary-when").textContent = ""; return; }
+  if (!r) { $("analysis").innerHTML = `<span class="muted">No report yet. The analyzer writes one every hour, or run it from Experiment analysis.</span>`; $("summary-when").textContent = ""; return; }
   const m = r.metrics, c = m.closed_trades || {};
   const top = Object.entries(m.rejection_reasons || {}).slice(0, 3).map(([k, v]) => `${pretty(k)} (${v})`).join(", ") || "–";
   const row = (k, v) => `<dt>${esc(k)}</dt><dd>${v}</dd>`;

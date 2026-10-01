@@ -192,7 +192,22 @@ Open `https://<your-host>/` and sign in with `DASHBOARD_USERNAME` / `DASHBOARD_P
   daily or drawdown breaker.
 - Open and closed trades (with R multiples), every 15-minute decision opportunity (tap one
   to see the exact snapshot sent to the model, its raw answer and every risk check), the
-  experiment summary, the news calendar, central-bank reads and system events.
+  experiment summary, the news calendar (first five items, the rest scroll), central-bank reads
+  and system events.
+
+### Analysis page (`/analysis`)
+
+Linked from the navigation and from the *Experiment analysis* button on the overview. It shows
+what `python -m app.experiments.analyzer --once` prints, in plain terms:
+- results so far: trades, win rate, average R, P/L and drawdown
+- the funnel from 15-minute cycles to setups, model reviews, signals, risk approvals and fills
+- why trades didn't happen: top wait reasons and risk-engine blocks
+- execution and health figures
+- results by condition: direction, market regime, model confidence, news risk and more
+- a day-by-day timeline of what has run, over the last 7, 30 or 90 days
+
+*Run analysis now* computes and stores a fresh report on demand, so the separate analyzer process
+is optional.
 
 ### History page (`/history`)
 
