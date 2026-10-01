@@ -23,8 +23,9 @@
 .news-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--grid); font-size: 13px; }
 .news-row:last-child { border-bottom: 0; }
 .news-row .when { font: 12px var(--mono); color: var(--ink-2); }
-/* News shows its first few items; the rest scroll inside the panel so system events stay in view. */
-#news { position: relative; overflow-y: auto; overscroll-behavior: contain; }
+/* Long lists (news, decisions, system events) show their first few items and scroll the rest. */
+#news, #decisions, #events { overflow-y: auto; overscroll-behavior: contain; }
+#decisions thead th { position: sticky; top: 0; z-index: 1; }
 #news .sub { border-top: 1px solid var(--grid); background: var(--panel); }
 svg#nav-chart { height: 260px; }
 @media (max-width: 899px) {
@@ -132,7 +133,18 @@ svg#nav-chart { height: 260px; }
 const {esc, fmt, dt, short, pretty, signed, codes, api} = T;
 const $ = (id) => document.getElementById(id);
 let onlyLlm = false, minLevel = "WARNING", accountSeries = [];
-const NEWS_VISIBLE = 5;
+const NEWS_VISIBLE = 5, DECISIONS_VISIBLE = 10, EVENTS_VISIBLE = 5;
+
+// Show the first `visible` items of a list panel; the rest scroll inside it. `keep` is the
+// scroll position from before the re-render, so the 15 s refresh doesn't jump back to the top.
+function capList(box, selector, visible, keep) {
+  const items = box.querySelectorAll(selector);
+  if (items.length <= visible) { box.style.maxHeight = ""; return items.length; }
+  const bottom = items[visible - 1].getBoundingClientRect().bottom;
+  box.style.maxHeight = `${Math.ceil(bottom - box.getBoundingClientRect().top)}px`;
+  box.scrollTop = keep;
+  return items.length;
+}
 T.renderShell("overview");
 
 async function refresh() {
@@ -250,8 +262,10 @@ function decisionCell(d) {
   return `WAIT <span class="muted">· ${esc(why)}</span>`;
 }
 function renderDecisions(rows) {
-  if (!Array.isArray(rows) || !rows.length) { $("decisions").innerHTML = `<div class="empty">No decisions yet. The engine decides at every 15-minute close while the market is open.</div>`; return; }
-  $("decisions").innerHTML = `<table class="t"><thead><tr><th>Candle</th><th>Setup</th><th>Decision</th><th class="num">Conf.</th><th>Why</th></tr></thead><tbody>${rows.map(d => {
+  const box = $("decisions"), keep = box.scrollTop;
+  box.style.maxHeight = "";
+  if (!Array.isArray(rows) || !rows.length) { box.innerHTML = `<div class="empty">No decisions yet. The engine decides at every 15-minute close while the market is open.</div>`; return; }
+  box.innerHTML = `<table class="t"><thead><tr><th>Candle</th><th>Setup</th><th>Decision</th><th class="num">Conf.</th><th>Why</th></tr></thead><tbody>${rows.map(d => {
     const clickable = d.candidate || d.llm_called;
     return `<tr ${clickable ? `class="click" data-href="/history/r-${d.id}" tabindex="0"` : ""}><td style="white-space:nowrap">${esc(short(d.candle_time))}</td><td>${d.candidate ? esc(d.direction) : '<span class="muted">–</span>'}</td><td style="white-space:nowrap">${decisionCell(d)}</td><td class="num">${d.confidence == null ? "–" : fmt(d.confidence)}</td><td class="codes">${codes([...(d.rejection_reasons || []), ...(d.reason_codes || [])].slice(0, 4)) || codes(d.failure_codes)}</td></tr>`;
   }).join("")}</tbody></table>`;
@@ -259,29 +273,25 @@ function renderDecisions(rows) {
     tr.onclick = () => { location.href = tr.dataset.href; };
     tr.onkeydown = (e) => { if (e.key === "Enter") location.href = tr.dataset.href; };
   });
+  capList(box, "tbody tr", DECISIONS_VISIBLE, keep);
 }
 function renderEvents(rows) {
-  if (!Array.isArray(rows) || !rows.length) { $("events").innerHTML = `<div class="empty">Nothing to report.</div>`; return; }
+  const box = $("events"), keep = box.scrollTop;
+  box.style.maxHeight = "";
+  if (!Array.isArray(rows) || !rows.length) { box.innerHTML = `<div class="empty">Nothing to report.</div>`; return; }
   const tone = {INFO: "d-off", WARNING: "d-warn", ERROR: "d-bad", CRITICAL: "d-bad"};
-  $("events").innerHTML = rows.map(e => `<div class="event"><div class="top"><span><span class="dot ${tone[e.level]}"></span> ${esc(pretty(e.level))} · ${esc(e.component)}</span><span>${esc(short(e.created_at))}</span></div><div><b>${esc(pretty(e.event_type))}</b></div><div class="msg">${esc(e.message)}</div></div>`).join("");
+  box.innerHTML = rows.map(e => `<div class="event"><div class="top"><span><span class="dot ${tone[e.level]}"></span> ${esc(pretty(e.level))} · ${esc(e.component)}</span><span>${esc(short(e.created_at))}</span></div><div><b>${esc(pretty(e.event_type))}</b></div><div class="msg">${esc(e.message)}</div></div>`).join("");
+  capList(box, ".event", EVENTS_VISIBLE, keep);
 }
 function renderNews(n) {
   if (!n || n.__error) { $("news").innerHTML = `<div class="empty">News unavailable.</div>`; return; }
   const ev = (n.events || []).map(e => `<div class="news-row"><div class="when">${esc(short(e.time))}</div><div><span class="dot ${e.impact === "HIGH" ? "d-bad" : "d-warn"}"></span> <b>${esc(e.currency)}</b> ${esc(e.title)} <span class="muted">· ${e.impact === "HIGH" ? "high" : "medium"} impact</span><div class="codes">forecast ${esc(e.forecast ?? "–")} · previous ${esc(e.previous ?? "–")}${e.actual ? " · actual " + esc(e.actual) : ""}</div></div></div>`).join("");
   const it = (n.interpretations || []).slice(0, 3).map(i => `<div class="news-row"><div class="when">${esc(i.currency)}</div><div><b>${esc(pretty(i.bias))}</b> <span class="muted">(${esc(pretty(i.tone))}, ${fmt(i.confidence)})</span><div class="codes">${esc(i.summary || "")}</div></div></div>`).join("");
   const box = $("news"), keep = box.scrollTop;
+  box.style.maxHeight = "";
   box.innerHTML = (ev || `<div class="empty">No medium or high-impact events in the next 48 hours.</div>`) + (it ? `<div class="panel-h sub"><h2>Central-bank reads</h2></div>${it}` : "");
-  // Show the first NEWS_VISIBLE items; anything beyond scrolls inside the panel.
-  const rows = box.querySelectorAll(".news-row");
-  if (rows.length > NEWS_VISIBLE) {
-    const last = rows[NEWS_VISIBLE - 1];
-    box.style.maxHeight = `${last.offsetTop + last.offsetHeight}px`;
-    box.scrollTop = keep;
-    $("news-aside").textContent = `${rows.length} items · scroll`;
-  } else {
-    box.style.maxHeight = "";
-    $("news-aside").textContent = "next 48h";
-  }
+  const count = capList(box, ".news-row", NEWS_VISIBLE, keep);
+  $("news-aside").textContent = count > NEWS_VISIBLE ? `${count} items · scroll` : "next 48h";
 }
 function renderAnalysis(r) {
   if (!r) { $("analysis").innerHTML = `<span class="muted">No report yet. The analyzer writes one every hour, or run it from Experiment analysis.</span>`; $("summary-when").textContent = ""; return; }
