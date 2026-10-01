@@ -36,6 +36,7 @@ class FakeBroker:
     bid: float = 1.1025
     ask: float = 1.1026
     market_status: str = "TRADEABLE"
+    account_without_balance: bool = False  # simulate an /accounts entry with no balance object
     # behaviour switches for POST /positions
     order_mode: str = "fill"  # fill | reject | reject_confirm | no_confirm | timeout_before | timeout_after | http500
     fill_offset: float = 0.0  # added to the fill price of BUYs (subtracted for SELLs): simulated slippage
@@ -151,6 +152,8 @@ class FakeBroker:
 
         if path == "/accounts":
             upl = sum(p["position"]["upl"] for p in self.positions.values())
+            if self.account_without_balance:
+                return httpx.Response(200, json={"accounts": [{"accountId": ACCOUNT_ID, "currency": self.currency}]})
             return httpx.Response(200, json={"accounts": [{
                 "accountId": ACCOUNT_ID, "accountName": "USD", "status": "ENABLED", "accountType": "CFD",
                 "preferred": True, "currency": self.currency,

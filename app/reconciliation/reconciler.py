@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from app.alerts.notifier import Notifier
-from app.broker.capital import CapitalClient
+from app.broker.capital import CapitalClient, CapitalDataError
 from app.broker.types import AccountState, BrokerPosition
 from app.config.settings import Settings
 from app.db.control import get_control, set_control
@@ -98,6 +98,9 @@ class Reconciler:
         self._last_snapshot_at: datetime | None = None
         self._failures = 0
         self._missing_since: dict[str, datetime] = {}
+        # False while the latest account reading was unusable: breakers are then left untouched.
+        self._account_reading_ok = False
+        self._bad_reading_reported = False
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -134,7 +137,36 @@ class Reconciler:
 
     async def _sync_account(self, positions: list[BrokerPosition]) -> None:
         now = utcnow()
-        self.account = AccountView.from_state(await self.client.get_account(), positions, now)
+        try:
+            state = await self.client.get_account()
+            problem = None if state.nav > 0 else f"equity {state.nav}"
+            raw = state.raw
+        except CapitalDataError as exc:
+            problem, raw = str(exc), exc.body
+        if problem:
+            # A $0 or missing balance from the API is a bad reading, not a real loss: never let it
+            # trip the circuit breakers or move peak / start-of-day NAV. The previous reading is
+            # kept, so if no valid reading arrives the risk engine's ACCOUNT_HEALTH check (account
+            # state older than MAX_ACCOUNT_STATE_AGE_SECONDS) blocks new trades until one does.
+            self._account_reading_ok = False
+            if self._bad_reading_reported:
+                return  # already reported; one warning per run of bad readings
+            self._bad_reading_reported = True
+            await self.notifier.warning(
+                COMPONENT,
+                "ACCOUNT_READING_IGNORED",
+                f"Ignored an unusable account reading from Capital.com ({problem}). Circuit breakers were not "
+                f"updated; new trades pause if no valid reading arrives within "
+                f"{self.settings.max_account_state_age_seconds:.0f}s.",
+                details={"account": raw},
+                dedup_key="account_reading_ignored",
+            )
+            return
+        self._account_reading_ok = True
+        if self._bad_reading_reported:
+            self._bad_reading_reported = False
+            await self.notifier.info(COMPONENT, "ACCOUNT_READING_RECOVERED", f"Account readings are valid again (equity {state.nav})")
+        self.account = AccountView.from_state(state, positions, now)
         interval = self.settings.account_snapshot_interval_seconds
         if self._last_snapshot_at is None or (now - self._last_snapshot_at).total_seconds() >= interval:
             a = self.account
@@ -322,7 +354,7 @@ class Reconciler:
     # ------------------------------------------------------------------ breakers
 
     async def _update_breakers(self) -> None:
-        if self.account is None:
+        if self.account is None or not self._account_reading_ok:
             return
         nav = self.account.nav
         today = trading_day(self.account.fetched_at).isoformat()

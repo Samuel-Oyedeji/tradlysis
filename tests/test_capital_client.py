@@ -9,6 +9,7 @@ import pytest
 from app.broker import capital
 from app.broker.capital import (
     CapitalClient,
+    CapitalDataError,
     CapitalError,
     CapitalTransportError,
     account_state_from_api,
@@ -70,7 +71,8 @@ async def test_login_switches_to_configured_account():
         if req.method == "PUT" and req.url.path == "/api/v1/session":
             switched.append(json.loads(req.content)["accountId"])
             return httpx.Response(200, json={"dealingEnabled": True})
-        return httpx.Response(200, json={"accounts": [{"accountId": "A2", "currency": "USD", "balance": {}}]})
+        return httpx.Response(200, json={"accounts": [{"accountId": "A2", "currency": "USD",
+                                                       "balance": {"balance": 500, "available": 500}}]})
 
     c = make(session_then(handler), account_id="A2")
     assert (await c.get_account()).account_id == "A2"
@@ -219,6 +221,15 @@ def test_account_state_mapping():
     a = account_state_from_api({"accountId": "A", "currency": "USD",
                                 "balance": {"balance": 1000, "deposit": 990, "profitLoss": 10, "available": 900}})
     assert (a.nav, a.balance, a.unrealized_pl, a.margin_used) == (Decimal("1000"), Decimal("990"), Decimal("10"), Decimal("100"))
+
+
+def test_account_without_usable_balance_is_a_data_error():
+    for entry in ({"accountId": "A"}, {"accountId": "A", "balance": {}}, {"accountId": "A", "balance": None},
+                  {"accountId": "A", "balance": {"balance": "n/a"}}):
+        with pytest.raises(CapitalDataError):
+            account_state_from_api(entry)
+    zero = account_state_from_api({"accountId": "A", "balance": {"balance": 0, "available": 0}})
+    assert zero.nav == 0  # parsed; whether it is plausible is the reconciler's call
 
 
 def test_price_bars_are_mid_and_completed_by_time():
