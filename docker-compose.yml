@@ -1,5 +1,13 @@
 # Tradlysis on a single VPS.
 #
+# Host ports (this server already uses 22, 53, 80, 443, 4000, 4096, 5435, 6545, 8005,
+# 8080, 8443, 8501 and 9000, so Tradlysis avoids all of them):
+#   8710 -> api:8000  dashboard/API, on 127.0.0.1 only (override with API_HOST_PORT in .env)
+#   5442 -> db:5432   bundled PostgreSQL, on 127.0.0.1 only, local-db profile only
+#                     (override with DB_HOST_PORT in .env)
+# engine, analyzer and migrate publish no ports. Inside the compose network the services
+# still talk on the container ports (api:8000, db:5432).
+#
 #   cp .env.example .env            # fill in credentials
 #   docker compose build
 #   docker compose run --rm migrate # apply database migrations (you run this yourself)
@@ -8,12 +16,17 @@
 # Using your own/managed PostgreSQL: set DATABASE_URL in .env and skip the `db` service.
 # Using the bundled PostgreSQL: `docker compose --profile local-db up -d db` and point
 # DATABASE_URL at postgresql://tradlysis:<POSTGRES_PASSWORD>@db:5432/tradlysis
+#
+# A literal `$` in a .env value (e.g. in a password) must be written as `$$`, or the whole
+# value wrapped in single quotes, because Compose expands `$` in env files.
 
 x-app: &app
   build:
     context: .
     dockerfile: docker/Dockerfile
   env_file: .env
+  # tini as PID 1 so `docker compose stop` (SIGTERM) reaches the Python processes
+  init: true
   restart: unless-stopped
   logging:
     driver: json-file
@@ -30,7 +43,7 @@ services:
     command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
     # Bound to localhost: put a TLS reverse proxy (Caddy/nginx) in front before exposing it.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${API_HOST_PORT:-8710}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
@@ -46,6 +59,7 @@ services:
       context: .
       dockerfile: docker/migrate.Dockerfile
     env_file: .env
+    init: true
     profiles: ["tools"]
 
   db:
@@ -55,11 +69,13 @@ services:
     environment:
       POSTGRES_USER: tradlysis
       POSTGRES_DB: tradlysis
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Not `:?`: Compose would then refuse to run *any* service when it is empty (the Supabase
+      # case). The postgres image itself refuses to initialise without a password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${DB_HOST_PORT:-5442}:5432"
 
 volumes:
   pgdata:

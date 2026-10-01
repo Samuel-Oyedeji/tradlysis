@@ -1,9 +1,39 @@
-.git
-.venv
-node_modules
-__pycache__
-.pytest_cache
-.ruff_cache
+# Keep the build context small and free of secrets. The images only need:
+#   docker/Dockerfile:         pyproject.toml, README.md, app/
+#   docker/migrate.Dockerfile: package.json, package-lock.json, prisma.config.ts, prisma/
+
+# Secrets: never bake credentials into an image (compose passes .env at run time)
 .env
 .env.*
+!.env.example
+
+# VCS / CI / editors / OS
+.git
+.gitignore
+.github
+.claude
+.idea
+.vscode
+**/.DS_Store
+
+# Python caches and build output
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+*.egg-info
+build
+dist
+
+# Node (reinstalled with npm ci inside the image)
+node_modules
+
+# Not needed at run time
 tests
+CLAUDE.md
+docker-compose*.yml
