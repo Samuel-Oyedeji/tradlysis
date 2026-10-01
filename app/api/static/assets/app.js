@@ -19,8 +19,9 @@
   const ICONS = {
     overview: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 16V9m5 7V4m5 12v-5m4 5V7"/></svg>',
     history: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="5" cy="4.5" r="1.8"/><circle cx="5" cy="15.5" r="1.8"/><circle cx="14" cy="10" r="1.8"/><path d="M5 6.3v7.4M5 10h7.2"/></svg>',
+    analysis: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="2"/><path d="M6.5 13l2.5-3 2 2 3-4.5"/></svg>',
   };
-  const PAGES = [["overview", "/", "Overview"], ["history", "/history", "History"]];
+  const PAGES = [["overview", "/", "Overview"], ["history", "/history", "History"], ["analysis", "/analysis", "Analysis"]];
 
   function statusRows(s) {
     if (!s) return [];
