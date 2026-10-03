@@ -167,6 +167,39 @@ changed with `API_HOST_PORT` / `DB_HOST_PORT` in `.env`; the list is at the top 
 `docker-compose.yml`. To use the dashboard from your phone, put a TLS reverse proxy in front of
 it (for example Caddy: `your.domain { reverse_proxy 127.0.0.1:8710 }`), or use an SSH tunnel.
 
+### Automatic deployment (GitHub Actions)
+
+`.github/workflows/deploy.yml` deploys every push to `main` (including merged pull requests)
+once CI has passed on it. It SSHes into the server, goes to the checkout, fast-forwards it to
+the commit CI tested, runs `docker compose build` and `docker compose up -d engine api
+analyzer`, then waits for the API health check and checks that `engine` and `analyzer` are
+running. A failure at any step fails the job; the services already running are left as they are
+until `up -d` replaces them. Migrations are not run (see above). The engine reconciles with the
+broker when it starts, so a restart picks up open trades again.
+
+One-time setup:
+
+1. Make an SSH key just for deploys, on your own computer (not the server):
+   `ssh-keygen -t ed25519 -f tradlysis_deploy -C github-actions-deploy -N ""`.
+2. Append `tradlysis_deploy.pub` to `~/.ssh/authorized_keys` of the deploy user on the server.
+   That user must be able to run `docker` without `sudo` and `git fetch` in the checkout, and
+   the checkout must be on `main`.
+3. In GitHub, Settings -> Secrets and variables -> Actions, add these repository secrets:
+
+   | Secret | Value |
+   |---|---|
+   | `DEPLOY_HOST` | server IP or hostname |
+   | `DEPLOY_USER` | the deploy user |
+   | `DEPLOY_SSH_KEY` | the whole private key file `tradlysis_deploy` |
+   | `DEPLOY_PATH` | absolute path of the checkout, e.g. `/home/ubuntu/tradlysis` |
+   | `DEPLOY_HOST_FINGERPRINT` | output of `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub \| cut -d' ' -f2` run on the server (`SHA256:...`) |
+   | `DEPLOY_PORT` | only if SSH is not on port 22 |
+
+4. Delete the local `tradlysis_deploy` private key once it is saved in GitHub.
+
+To redeploy, re-run the failed Deploy job from the Actions tab. To roll back, revert the
+commit on `main`; the revert deploys like any other push.
+
 ### Local development (without Docker)
 
 ```bash

@@ -1,0 +1,89 @@
+name: Deploy
+
+# Deploys to the VPS after CI passes on main. Merging a pull request is a push to main, so merges
+# deploy too; pull requests and other branches never do. Setup (deploy key + secrets) is in the
+# README under "Automatic deployment".
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+# One deploy at a time; a newer one waits for the running one instead of cancelling it mid-build.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Pull, build, restart and health-check on the server
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          # The commit CI just passed, so the server never runs anything newer that CI hasn't seen.
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+          command_timeout: 30m
+          envs: DEPLOY_PATH,DEPLOY_SHA
+          script: |
+            set -eu
+            cd "$DEPLOY_PATH"
+
+            branch=$(git rev-parse --abbrev-ref HEAD)
+            if [ "$branch" != main ]; then
+              echo "Server checkout is on '$branch', not main; not deploying."
+              exit 1
+            fi
+
+            echo "==> git pull ($DEPLOY_SHA)"
+            git fetch origin main
+            # Fast-forward only: stops instead of merging if the server has local commits. A no-op
+            # when a newer deploy already moved the checkout past this commit.
+            git merge --ff-only "$DEPLOY_SHA"
+
+            echo "==> docker compose build"
+            docker compose build
+
+            echo "==> docker compose up -d"
+            docker compose up -d engine api analyzer
+
+            echo "==> health check"
+            api=$(docker compose ps -q api)
+            tries=0
+            while :; do
+              status=$(docker inspect -f '{{.State.Health.Status}}' "$api")
+              [ "$status" = healthy ] && break
+              tries=$((tries + 1))
+              # unhealthy = 3 failed checks; 36 x 5s = 3 minutes for the first check to pass
+              if [ "$status" = unhealthy ] || [ "$tries" -ge 36 ]; then
+                echo "api is $status"
+                docker compose logs --tail 50 api
+                exit 1
+              fi
+              sleep 5
+            done
+            echo "api is healthy"
+
+            for svc in engine analyzer; do
+              id=$(docker compose ps -a -q "$svc")
+              state=$(docker inspect -f '{{.State.Status}}' "$id")
+              if [ "$state" != running ]; then
+                echo "$svc is $state"
+                docker compose logs --tail 50 "$svc"
+                exit 1
+              fi
+            done
+
+            docker compose ps
+            echo "Deployed $(git rev-parse --short HEAD)"
