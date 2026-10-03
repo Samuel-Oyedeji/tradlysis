@@ -156,14 +156,16 @@ docker compose logs -f engine
 | Service | Command | Role |
 |---|---|---|
 | `engine` | `python -m app.engine` | market data, technicals, news, decisions, risk, execution, reconciliation |
-| `api` | `uvicorn app.api.main:app` | dashboard + control plane (port 8000, bound to localhost) |
+| `api` | `uvicorn app.api.main:app` | dashboard + control plane (host port 8710, bound to localhost) |
 | `analyzer` | `python -m app.experiments.analyzer` | hourly experiment statistics; never trades |
 | `migrate` | `prisma migrate deploy` | one-shot, run manually |
 | `db` | PostgreSQL 16 | optional (`--profile local-db`) if you don't have a database |
 
-The API is bound to `127.0.0.1:8000`. To use the dashboard from your phone, put a TLS reverse
-proxy in front of it (for example Caddy: `your.domain { reverse_proxy 127.0.0.1:8000 }`), or
-use an SSH tunnel.
+The API is published on `127.0.0.1:8710` (container port 8000; the bundled `db`, if used, on
+`127.0.0.1:5442`). Both host ports avoid ones commonly taken on a shared server and can be
+changed with `API_HOST_PORT` / `DB_HOST_PORT` in `.env`; the list is at the top of
+`docker-compose.yml`. To use the dashboard from your phone, put a TLS reverse proxy in front of
+it (for example Caddy: `your.domain { reverse_proxy 127.0.0.1:8710 }`), or use an SSH tunnel.
 
 ### Local development (without Docker)
 
