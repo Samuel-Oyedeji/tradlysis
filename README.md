@@ -192,7 +192,7 @@ One-time setup:
    | `DEPLOY_USER` | the deploy user |
    | `DEPLOY_SSH_KEY` | the whole private key file `tradlysis_deploy` |
    | `DEPLOY_PATH` | absolute path of the checkout, e.g. `/home/ubuntu/tradlysis` |
-   | `DEPLOY_HOST_FINGERPRINT` | output of `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub \| cut -d' ' -f2` run on the server (`SHA256:...`) |
+   | `DEPLOY_HOST_FINGERPRINT` | output of `ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub \| cut -d' ' -f2` run on the server (`SHA256:...`, nothing around it). The deploy action prefers the ECDSA host key over ED25519; if the server has no ECDSA key, use `ssh_host_rsa_key.pub` |
    | `DEPLOY_PORT` | only if SSH is not on port 22 |
 
 4. Delete the local `tradlysis_deploy` private key once it is saved in GitHub.
