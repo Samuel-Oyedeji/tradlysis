@@ -322,13 +322,14 @@ place orders.
   - never resubmitting an entry whose outcome was unknown
   - refusing an entry while a position is open on the instrument
   - no new orders while any order is unresolved
-- Telegram alerts for:
-  - stream disconnects and stale prices
-  - unexpected positions
-  - broker/API errors
-  - fills, closes and rejections
-  - breaker trips
-  - engine start/stop
+- Telegram alerts, kept to what matters (everything else is logged and shown under system
+  events on the dashboard):
+  - setups the rules find, with the plan and the model's verdict
+  - fills, risk/broker rejections, blocked orders, slippage closes and trade closes
+  - reconciliation findings: unexpected positions, adopted/missing orders, and reconciliation
+    failing for about a minute (single failed passes are not sent)
+  - stale prices during market hours (individual stream disconnects/reconnects are not sent)
+  - other errors, breaker trips, and engine start/stop
 
 ## Experiment analysis
 

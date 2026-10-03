@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.alerts.telegram import TelegramSender
-from app.db.models import Decision, DecisionRequest, Order, RiskCheck, TechnicalSnapshot, Trade
+from app.db.models import Decision, DecisionRequest, Order, RiskCheck, SystemEvent, TechnicalSnapshot, Trade
 from app.decision.openrouter import OpenRouterClient
 from app.engine import TradingEngine
 from app.market_data.state import PriceTick
@@ -119,6 +119,7 @@ async def test_no_setup_is_logged_as_prefilter_wait_and_deduplicated(db):
     again = await engine.run_cycle(candle_time)
     assert again.note == "cycle already processed"
     assert await count(db, DecisionRequest) == 1
+    assert await _setup_events(db) == [], "no setup, nothing for Telegram"
 
 
 async def test_candidate_confirmed_approved_and_executed(db, monkeypatch):
@@ -153,6 +154,7 @@ async def test_candidate_confirmed_approved_and_executed(db, monkeypatch):
     assert rc.approved and rc.units > 0 and rc.risk_pct == pytest.approx(0.25, abs=0.01)
     assert order.status == "FILLED" and order.units == rc.units
     assert trade.state == "OPEN" and trade.order_id == order.id
+    assert (await _setup_events(db)) == ["BUY EUR_USD"]
 
 
 async def test_news_blackout_blocks_before_llm(db, monkeypatch):
@@ -170,6 +172,7 @@ async def test_news_blackout_blocks_before_llm(db, monkeypatch):
         dec = await s.scalar(select(Decision))
     assert dec.reason_codes == ["NEWS_BLACKOUT"]
     assert not broker.order_posts
+    assert (await _setup_events(db)) == ["BUY EUR_USD"]
 
 
 async def test_llm_buy_without_plan_is_rejected_by_risk(db):
@@ -182,3 +185,10 @@ async def test_llm_buy_without_plan_is_rejected_by_risk(db):
     assert summary.llm_called and summary.decision == "BUY"
     assert summary.approved is False and "TRADE_PLAN_MATCHES" in summary.rejections
     assert not broker.order_posts
+
+
+async def _setup_events(db) -> list[str]:
+    """First line ("<direction> <instrument>") of every SETUP event, i.e. each setup Telegram heard about."""
+    async with db.session() as s:
+        rows = (await s.scalars(select(SystemEvent).where(SystemEvent.event_type == "SETUP"))).all()
+    return [" ".join(r.message.split("\n")[0].split(" ")[:2]) for r in rows]

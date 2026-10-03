@@ -169,7 +169,8 @@ class TradingEngine:
         )
         if not self.llm.enabled:
             await self.notifier.warning(
-                COMPONENT, "LLM_DISABLED", "OPENROUTER_API_KEY not set: every opportunity will be recorded as WAIT"
+                COMPONENT, "LLM_DISABLED", "OPENROUTER_API_KEY not set: every opportunity will be recorded as WAIT",
+                alert=True,
             )
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -386,6 +387,11 @@ class TradingEngine:
         summary.decision = outcome.decision
         summary.confidence = outcome.confidence
         decision_id = await self._record_decision(request_id, outcome)
+        if strategy.candidate:
+            await self.notifier.info(
+                COMPONENT, "SETUP", _setup_message(s.instrument, strategy, outcome),
+                alert=True, dedup_key=f"setup_{request_id}",
+            )
         if not outcome.is_trade:
             return summary
 
@@ -598,6 +604,25 @@ class TradingEngine:
             news_blackout_titles=[e["title"] for e in news.blackout_events],
             calendar_fresh=news.calendar_fresh,
         )
+
+
+def _setup_message(instrument: str, strategy: StrategyResult, outcome: DecisionOutcome) -> str:
+    """Telegram text for a deterministic setup: the plan and what the model made of it."""
+    plan = strategy.trade_plan
+    lines = [f"{strategy.direction or '?'} {instrument} · {strategy.setup}"]
+    if plan:
+        lines.append(
+            f"Entry {plan.entry:g} · SL {plan.stop_loss:g} ({plan.risk_pips:.1f} pips) · "
+            f"TP {plan.take_profit:g} · R:R {plan.risk_reward:.1f}"
+        )
+    conf = "" if outcome.confidence is None else f" ({outcome.confidence:.0%})"
+    if outcome.is_trade:
+        lines.append(f"Model: {outcome.decision}{conf} → checking risk")
+    elif outcome.source == "PREFILTER":
+        lines.append(f"No trade: {', '.join(outcome.reason_codes)}")
+    else:
+        lines.append(f"Model: {outcome.decision}{conf}, no trade ({', '.join(outcome.reason_codes) or 'no reason given'})")
+    return "\n".join(lines)
 
 
 async def main() -> None:

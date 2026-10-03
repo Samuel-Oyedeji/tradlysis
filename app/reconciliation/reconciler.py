@@ -41,6 +41,9 @@ COMPONENT = "reconciliation"
 CLOSE_DETAILS_GRACE_SECONDS = 60.0
 # The activity/transaction audit trail re-reads this far back on every cycle (rows are de-duplicated).
 HISTORY_OVERLAP = timedelta(minutes=10)
+# Telegram hears about failing reconciliation only once it has failed this many passes in a
+# row (about a minute at the default 15 s interval); single failures are logged.
+RECONCILE_ALERT_AFTER_FAILURES = 4
 
 
 @dataclass
@@ -124,12 +127,17 @@ class Reconciler:
                 COMPONENT,
                 "RECONCILE_FAILED",
                 f"Reconciliation failed ({self._failures} in a row): {exc!r}",
+                # One failed pass is usually a broker hiccup that the next pass fixes.
+                alert=self._failures >= RECONCILE_ALERT_AFTER_FAILURES,
                 dedup_key="reconcile_failed",
             )
             log.exception("reconciliation failed")
             return False
         if self._failures:
-            await self.notifier.info(COMPONENT, "RECONCILE_RECOVERED", "Reconciliation recovered", alert=True)
+            await self.notifier.info(
+                COMPONENT, "RECONCILE_RECOVERED", f"Reconciliation recovered after {self._failures} failed passes",
+                alert=self._failures >= RECONCILE_ALERT_AFTER_FAILURES,
+            )
         self._failures = 0
         return True
 
