@@ -26,6 +26,9 @@
 /* Long lists (news, decisions, system events) show their first few items and scroll the rest. */
 #news, #decisions, #events { overflow-y: auto; overscroll-behavior: contain; }
 #decisions thead th { position: sticky; top: 0; z-index: 1; }
+#open-trades .t th, #open-trades .t td { padding-left: 8px; padding-right: 8px; }
+#open-trades .t th:first-child, #open-trades .t td:first-child { padding-left: 16px; }
+#open-trades .t th:last-child, #open-trades .t td:last-child { padding-right: 16px; }
 #news .sub { border-top: 1px solid var(--grid); background: var(--panel); }
 svg#nav-chart { height: 260px; }
 @media (max-width: 899px) {
@@ -133,6 +136,7 @@ svg#nav-chart { height: 260px; }
 const {esc, fmt, dt, short, pretty, signed, codes, api} = T;
 const $ = (id) => document.getElementById(id);
 let onlyLlm = false, minLevel = "WARNING", accountSeries = [];
+const OUTCOME_LABEL = {take_profit: "take-profit", stop_loss: "stop-loss", manual: "closed by you", bot_exit: "bot safety exit", margin_closeout: "margin close-out", unknown: "unknown"};
 const NEWS_VISIBLE = 5, DECISIONS_VISIBLE = 10, EVENTS_VISIBLE = 5;
 
 // Show the first `visible` items of a list panel; the rest scroll inside it. `keep` is the
@@ -250,11 +254,11 @@ window.addEventListener("resize", renderChart);
 
 function renderOpen(trades) {
   if (!Array.isArray(trades) || !trades.length) { $("open-trades").innerHTML = `<div class="empty">No open trades.</div>`; return; }
-  $("open-trades").innerHTML = `<table class="t"><thead><tr><th>Opened</th><th>Side</th><th class="num">Units</th><th class="num">Entry</th><th class="num">Stop-loss</th><th class="num">Take-profit</th><th class="num">Unrealized</th></tr></thead><tbody>${trades.map(t => `<tr><td>${esc(short(t.open_time))}${t.unexpected ? ' <span class="pill"><span class="dot d-bad"></span>external</span>' : ""}</td><td>${esc(t.direction)}</td><td class="num">${Math.abs(t.current_units).toLocaleString()}</td><td class="num">${fmt(t.open_price, 5)}</td><td class="num">${fmt(t.stop_loss, 5)}</td><td class="num">${fmt(t.take_profit, 5)}</td><td class="num">${signed(t.unrealized_pl)}</td></tr>`).join("")}</tbody></table>`;
+  $("open-trades").innerHTML = `<table class="t"><thead><tr><th>Opened</th><th>Side</th><th class="num">Units</th><th class="num">Entry</th><th class="num" title="Stop-loss">Stop</th><th class="num" title="Take-profit">Target</th><th class="num" title="Where the trade stands now: in R, and unrealized P/L">Now</th><th class="num" title="Furthest the trade has gone for / against you, in R">Best / worst</th></tr></thead><tbody>${trades.map(t => { const x = t.excursion; return `<tr><td>${esc(short(t.open_time))}${t.unexpected ? ' <span class="pill"><span class="dot d-bad"></span>external</span>' : ""}</td><td>${esc(t.direction)}</td><td class="num">${Math.abs(t.current_units).toLocaleString()}</td><td class="num">${fmt(t.open_price, 5)}</td><td class="num">${fmt(t.stop_loss, 5)}</td><td class="num">${fmt(t.take_profit, 5)}</td><td class="num" style="white-space:nowrap">${x ? signed(x.result_r, 1, "R") : ""} <span class="muted">(${t.unrealized_pl == null ? "–" : (t.unrealized_pl > 0 ? "+" : "") + fmt(t.unrealized_pl)})</span></td><td class="num" style="white-space:nowrap">${x ? `${signed(x.best_r, 1)} / ${signed(-x.worst_r, 1)}<span class="muted">R</span>` : "–"}</td></tr>`; }).join("")}</tbody></table>`;
 }
 function renderClosed(trades) {
   if (!Array.isArray(trades) || !trades.length) { $("closed-trades").innerHTML = `<div class="empty">No closed trades yet.</div>`; return; }
-  $("closed-trades").innerHTML = `<table class="t"><thead><tr><th>Closed</th><th>Side</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th class="num">R</th><th class="num">P/L</th></tr></thead><tbody>${trades.map(t => `<tr><td>${esc(short(t.close_time))}</td><td>${esc(t.direction)}</td><td class="num">${fmt(t.open_price, 5)}</td><td class="num">${fmt(t.close_price, 5)}</td><td>${esc(pretty(t.close_reason))}</td><td class="num">${signed(t.r_multiple, 2, "R")}</td><td class="num">${signed(t.realized_pl)}</td></tr>`).join("")}</tbody></table>`;
+  $("closed-trades").innerHTML = `<table class="t"><thead><tr><th>Closed</th><th>Side</th><th class="num">Entry</th><th class="num">Exit</th><th>How it ended</th><th class="num">R</th><th class="num" title="Furthest the trade went in your favour before closing">Best</th><th class="num">P/L</th></tr></thead><tbody>${trades.map(t => `<tr><td>${esc(short(t.close_time))}</td><td>${esc(t.direction)}</td><td class="num">${fmt(t.open_price, 5)}</td><td class="num">${fmt(t.close_price, 5)}</td><td>${esc(OUTCOME_LABEL[t.outcome] || pretty(t.close_reason))}</td><td class="num">${signed(t.r_multiple, 2, "R")}</td><td class="num">${t.excursion ? signed(t.excursion.best_r, 2, "R") : "–"}</td><td class="num">${signed(t.realized_pl)}</td></tr>`).join("")}</tbody></table>`;
 }
 function decisionCell(d) {
   if (d.decision === "BUY" || d.decision === "SELL") return `<b>${d.decision}</b> · ${d.risk_approved === true ? '<span class="good">approved</span>' : '<span class="bad">rejected</span>'}`;

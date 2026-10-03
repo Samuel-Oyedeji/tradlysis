@@ -43,6 +43,7 @@ from app.db.models import (
     Trade,
 )
 from app.db.session import Database
+from app.experiments import excursion
 from app.market_data.timeutil import utcnow
 
 log = logging.getLogger(__name__)
@@ -188,6 +189,9 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             elif t is not None:
                 end = utcnow()
             bars = await history.load_bars(s, settings.instrument, start - timedelta(hours=3), end + timedelta(hours=2))
+            if t is not None:
+                ex = await excursion.trade_excursion(s, t, utcnow())
+                chain.excursion = ex.to_dict() if ex else None
         hypo = None
         if req is not None and t is None and req.trade_plan:
             hypo = history.hypothetical_outcome(req.trade_plan, start, [b for b in bars if b.time >= start])
@@ -287,8 +291,11 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         q = select(Trade).order_by(desc(Trade.open_time)).limit(limit)
         if state:
             q = q.where(Trade.state == state)
+        now = utcnow()
         async with database.session() as s:
             rows = (await s.scalars(q)).all()
+            close_reasons = await excursion.bot_close_reasons(s)
+            measured = {t.id: await excursion.trade_excursion(s, t, now) for t in rows}
         return [
             {
                 "id": t.id,
@@ -309,6 +316,8 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
                 "unrealized_pl": float(t.unrealized_pl) if t.unrealized_pl is not None else None,
                 "r_multiple": t.r_multiple,
                 "unexpected": t.unexpected,
+                "outcome": excursion.close_category(t, close_reasons),
+                "excursion": measured[t.id].to_dict() if measured.get(t.id) else None,
             }
             for t in rows
         ]

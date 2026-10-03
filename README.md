@@ -206,6 +206,13 @@ what `python -m app.experiments.analyzer --once` prints, in plain terms:
 - why trades didn't happen: top wait reasons and risk-engine blocks
 - execution and health figures
 - results by condition: direction, market regime, model confidence, news risk and more
+- **how trades ended**: reached take-profit, hit stop-loss, closed by you, or a bot safety exit; and for
+  every trade its *best* and *worst* point (furthest in your favour / against you, in R), how much
+  profit it gave back before closing, and whether it reached +1R, +2R and +3R first. This is the
+  evidence for choosing stop-loss management rules (break-even, step-locks, trailing). It is measured
+  from stored 5- and 15-minute candles (mid prices), so it covers past trades too and needs nothing
+  recorded while a trade is open. The overview's trade tables and each trade's history timeline
+  show the same figures.
 - a day-by-day timeline of what has run, over the last 7, 30 or 90 days
 
 *Run analysis now* computes and stores a fresh report on demand, so the separate analyzer process

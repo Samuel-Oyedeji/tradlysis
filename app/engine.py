@@ -54,7 +54,8 @@ from app.technicals.engine import compute_technical_state, persist_technical_sta
 log = logging.getLogger("tradlysis.engine")
 COMPONENT = "engine"
 BARS_PER_TF = {"M15": 300, "H1": 300, "H4": 300, "D": 5, "W": 3, "M": 3}
-SYNC_COUNTS = {"M15": 20, "H1": 10, "H4": 10, "D": 5, "W": 3, "M": 2}
+# M5 is kept current for trade excursion measurement (app/experiments/excursion.py).
+SYNC_COUNTS = {"M5": 6, "M15": 20, "H1": 10, "H4": 10, "D": 5, "W": 3, "M": 2}
 
 
 @dataclass

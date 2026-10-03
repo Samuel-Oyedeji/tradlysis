@@ -24,6 +24,15 @@
 .reasons-h { padding: 10px 16px 4px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
 .t tr.group td { background: var(--panel-2); font-weight: 600; font-size: 12px; color: var(--ink-2); }
 .gap { margin-top: 16px; }
+.outcomes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--grid); }
+.outcomes .step { padding: 14px 16px; min-width: 0; }
+.outcomes .step + .step { border-left: 1px solid var(--grid); }
+.outcomes .k { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.outcomes .v { font: 600 22px/1.2 var(--mono); margin-top: 4px; }
+.outcomes .s { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+.missed { padding: 12px 16px; border-bottom: 1px solid var(--grid); font-size: 13px; }
+.sub-h { padding: 10px 16px 6px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
+@media (max-width: 899px) { .outcomes { grid-template-columns: repeat(2, minmax(0, 1fr)); } .outcomes .step:nth-child(odd) { border-left: 0; } .outcomes .step:nth-child(n+3) { border-top: 1px solid var(--grid); } }
 @media (max-width: 1100px) { .funnel { grid-template-columns: repeat(3, minmax(0, 1fr)); } .funnel .step:nth-child(4) { border-left: 0; } .funnel .step:nth-child(n+4) { border-top: 1px solid var(--grid); } }
 @media (max-width: 899px) {
   .two { grid-template-columns: minmax(0, 1fr); }
@@ -55,6 +64,11 @@
       <section class="panel" style="margin-top:16px" aria-labelledby="h-funnel">
         <div class="panel-h"><h2 id="h-funnel">From candle to trade</h2><span class="aside" id="since"></span></div>
         <div class="funnel" id="funnel"><div class="empty">No report yet.</div></div>
+      </section>
+
+      <section class="panel gap" aria-labelledby="h-outcomes">
+        <div class="panel-h"><h2 id="h-outcomes">How trades ended</h2><span class="aside">best / worst = furthest a trade went for / against you · R = multiples of the risk taken</span></div>
+        <div class="panel-b flush" id="outcomes"><div class="empty">No closed trades yet.</div></div>
       </section>
 
       <div class="two">
@@ -101,6 +115,7 @@ function renderReport(r) {
     $("funnel").innerHTML = `<div class="empty">No report yet. Press “Run analysis now”.</div>`;
     $("reasons").innerHTML = $("groups").innerHTML = "";
     $("execution").innerHTML = "";
+    $("outcomes").innerHTML = `<div class="empty">No closed trades yet.</div>`;
     return;
   }
   const m = r.metrics, c = m.closed_trades || {}, d = m.decisions || {}, o = m.orders || {};
@@ -160,6 +175,39 @@ function renderReport(r) {
   $("groups").innerHTML = groups.length ? `<table class="t"><thead><tr><th>Condition</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Average</th><th class="num">Total</th></tr></thead><tbody>
     ${groups.map(([name, g]) => `<tr class="group"><td colspan="5">${esc(name)}</td></tr>` + Object.entries(g).map(([k, s]) => `<tr><td>${esc(pretty(k))}</td><td class="num">${s.trades}</td><td class="num">${s.win_rate == null ? "–" : fmt(s.win_rate * 100, 0) + "%"}</td><td class="num">${signed(s.avg_r, 2, "R")}</td><td class="num">${signed(s.total_r, 2, "R")}</td></tr>`).join("")).join("")}
   </tbody></table>` : `<div class="empty">No closed trades yet. This fills in as trades finish.</div>`;
+  renderOutcomes(m.trade_outcomes);
+}
+
+const OUTCOME_LABEL = {take_profit: "Reached take-profit", stop_loss: "Hit stop-loss", manual: "Closed by you",
+  bot_exit: "Bot safety exit", margin_closeout: "Margin close-out", unknown: "Unknown"};
+const R = (v) => v == null ? "–" : signed(v, 2, "R");
+
+function renderOutcomes(o) {
+  if (!o || !o.all || !o.all.trades) {
+    $("outcomes").innerHTML = `<div class="empty">No closed trades yet. Each trade's outcome, best and worst point appear here as trades finish.</div>`;
+    return;
+  }
+  const c = o.counts || {}, total = o.all.trades;
+  const other = Object.entries(c).filter(([k]) => !["take_profit", "stop_loss", "manual"].includes(k)).reduce((n, [, v]) => n + v, 0);
+  const share = (n) => total ? `${fmt(n / total * 100, 0)}% of ${total}` : "";
+  const tiles = [["Reached take-profit", c.take_profit || 0], ["Hit stop-loss", c.stop_loss || 0], ["Closed by you", c.manual || 0], ["Other exits", other]];
+  const miss = o.not_reaching_tp || {}, rch = miss.reached || {};
+  const missed = miss.trades
+    ? `<div class="missed"><b>${miss.trades} trade${miss.trades === 1 ? "" : "s"} didn't reach take-profit.</b> Before closing, ${rch["1R"] ?? 0} got to +1R, ${rch["2R"] ?? 0} to +2R and ${rch["3R"] ?? 0} to +3R` +
+      `${miss.avg_best_r == null ? "" : `; on average their best point was ${R(miss.avg_best_r)}`}.` +
+      `${o.avg_target_r == null ? "" : ` <span class="muted">Take-profit was set at ${fmt(o.avg_target_r, 1)}R on average.</span>`}</div>`
+    : `<div class="missed">Every closed trade reached its take-profit.</div>`;
+  const byRows = Object.entries(o.by_outcome || {}).sort((a, b) => b[1].trades - a[1].trades)
+    .map(([k, st]) => `<tr><td>${esc(OUTCOME_LABEL[k] || pretty(k))}</td><td class="num">${st.trades}</td><td class="num">${R(st.avg_result_r)}</td><td class="num">${R(st.avg_best_r)}</td><td class="num">${st.avg_worst_r == null ? "–" : signed(-st.avg_worst_r, 2, "R")}</td><td class="num">${st.avg_given_back_r == null ? "–" : fmt(st.avg_given_back_r) + "R"}</td></tr>`).join("");
+  const trades = (o.trades || []).map(t => {
+    const x = t.excursion || {};
+    return `<tr><td>${esc(short(t.closed_at))}</td><td>${esc(t.direction)}</td><td>${esc(OUTCOME_LABEL[t.outcome] || pretty(t.outcome))}</td><td class="num">${R(x.result_r ?? t.r)}</td><td class="num">${R(x.best_r)}</td><td class="num">${x.worst_r == null ? "–" : signed(-x.worst_r, 2, "R")}</td><td class="num">${x.given_back_r == null ? "–" : fmt(x.given_back_r) + "R"}</td><td class="num">${x.target_r == null ? "–" : fmt(x.target_r, 1) + "R"}</td><td class="num">${t.hours == null ? "–" : fmt(t.hours, 1) + " h"}</td></tr>`;
+  }).join("");
+  $("outcomes").innerHTML = `<div class="outcomes">${tiles.map(([k, v]) => `<div class="step"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="s">${esc(share(v))}</div></div>`).join("")}</div>
+    ${missed}
+    <div class="scroll-x"><table class="t"><thead><tr><th>Ended by</th><th class="num">Trades</th><th class="num">Avg result</th><th class="num">Avg best</th><th class="num">Avg worst</th><th class="num">Avg given back</th></tr></thead><tbody>${byRows}</tbody></table></div>
+    <div class="sub-h">Each trade (most recent first)</div>
+    <div class="scroll-x"><table class="t"><thead><tr><th>Closed</th><th>Side</th><th>Ended by</th><th class="num">Result</th><th class="num">Best</th><th class="num">Worst</th><th class="num">Given back</th><th class="num">Take-profit at</th><th class="num">Held</th></tr></thead><tbody>${trades}</tbody></table></div>`;
 }
 
 function renderTimeline(rows) {
