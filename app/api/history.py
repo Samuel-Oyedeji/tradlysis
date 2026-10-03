@@ -46,6 +46,7 @@ class Chain:
     order: Order | None = None
     trade: Trade | None = None
     transactions: list[BrokerTransaction] = field(default_factory=list)
+    excursion: dict[str, Any] | None = None  # app.experiments.excursion.Excursion.to_dict()
 
 
 @dataclass
@@ -173,6 +174,16 @@ def _p(x: Any) -> str | None:
 
 def _m(x: Any) -> str | None:
     return None if x is None else f"{float(x):,.2f}"
+
+
+# Close reasons the broker reports without a specific trigger: closed in the Capital.com platform or with "close all".
+CLOSE_TITLES = {"CLOSED": "closed manually", "CLOSED_UNKNOWN": "closed (details unavailable)"}
+
+
+def _r(x: Any, signed: bool = False) -> str | None:
+    if x is None:
+        return None
+    return f"{float(x):+.2f}R" if signed else f"{float(x):.2f}R"
 
 
 def build_timeline(chain: Chain, hypothetical: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -304,18 +315,26 @@ def build_timeline(chain: Chain, hypothetical: dict[str, Any] | None = None) -> 
                 ", ".join(x for x in [tx.reason, f"P/L {_m(tx.pl)}" if tx.pl is not None else None] if x),
                 [("Transaction", tx.transaction_id)], raw=tx.raw,
             ))
+        ex = chain.excursion or {}
+        excursion_rows = [
+            ("Best point reached", _r(ex.get("best_r"), signed=True) if ex else None),
+            ("Worst point reached", _r(-ex["worst_r"], signed=True) if ex.get("worst_r") is not None else None),
+            ("Profit given back", _r(ex.get("given_back_r")) if ex.get("given_back_r") else None),
+            ("Take-profit was at", _r(ex.get("target_r"), signed=True) if ex.get("target_r") else None),
+        ]
         if t.state == "OPEN":
             nodes.append(_node("open", "Trade still open", "pending", None,
-                               f"Unrealized P/L {_m(t.unrealized_pl)}" if t.unrealized_pl is not None else ""))
+                               f"Unrealized P/L {_m(t.unrealized_pl)}" if t.unrealized_pl is not None else "",
+                               excursion_rows))
         else:
             dur = (t.close_time - t.open_time) if t.close_time else None
             win = outcome.code == "WON"
             nodes.append(_node(
-                "closed", f"Trade closed: {(t.close_reason or 'closed').replace('_', ' ').lower()}",
+                "closed", f"Trade closed: {CLOSE_TITLES.get(t.close_reason or '', (t.close_reason or 'closed').replace('_', ' ').lower())}",
                 "win" if win else ("loss" if outcome.code == "LOST" else "info"), t.close_time,
                 outcome.label + (f" · P/L {_m(t.realized_pl)}" if t.realized_pl is not None else ""),
                 [("Close price", _p(t.close_price)), ("Financing", _m(t.financing)),
-                 ("Duration", _fmt_duration(dur) if dur else None)],
+                 ("Duration", _fmt_duration(dur) if dur else None), *excursion_rows],
             ))
     elif hypothetical is not None:
         status = {"WOULD_WIN": "win", "WOULD_LOSE": "loss"}.get(hypothetical["result"], "info")

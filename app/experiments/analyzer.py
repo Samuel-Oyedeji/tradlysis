@@ -31,6 +31,7 @@ from app.db.models import (
     Trade,
 )
 from app.db.session import Database
+from app.experiments.excursion import bot_close_reasons, close_category, summarize, trade_excursion
 from app.logging_setup import setup_logging
 from app.market_data.timeutil import utcnow
 
@@ -51,6 +52,11 @@ class ClosedTrade:
     requested_price: float | None
     fill_price: float | None
     unexpected: bool
+    trade_id: int | None = None
+    opened_at: datetime | None = None
+    closed_at: datetime | None = None
+    outcome: str | None = None  # see app.experiments.excursion.close_category
+    excursion: dict[str, Any] | None = None  # see app.experiments.excursion.Excursion
 
 
 # ---------------------------------------------------------------------- pure metrics
@@ -203,6 +209,7 @@ def compute_metrics(
         "by_news_risk": group_r(closed, lambda t: str(t.snapshot.get("news", {}).get("risk", "unknown"))),
         "by_confidence": group_r(closed, lambda t: confidence_bucket(t.confidence)),
         "by_direction": group_r(closed, lambda t: t.direction),
+        "trade_outcomes": trade_outcomes(closed),
         "execution": {
             "avg_slippage_pips": round(sum(slippages) / len(slippages), 3) if slippages else None,
             "max_slippage_pips": round(max(slippages), 3) if slippages else None,
@@ -211,6 +218,25 @@ def compute_metrics(
             "avg_llm_latency_ms": round(sum(latencies) / len(latencies)) if latencies else None,
         },
     }
+
+
+def trade_outcomes(closed: Sequence[ClosedTrade], recent: int = 50) -> dict[str, Any]:
+    """How trades ended and how far they went first (take-profit / stop-loss / closed manually ...)."""
+    rows = [
+        {
+            "id": t.trade_id,
+            "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+            "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            "hours": round((t.closed_at - t.opened_at).total_seconds() / 3600, 2) if t.closed_at and t.opened_at else None,
+            "direction": t.direction,
+            "outcome": t.outcome or "unknown",
+            "r": t.r,
+            "excursion": t.excursion,
+        }
+        for t in closed
+    ]
+    rows.sort(key=lambda r: r["closed_at"] or "", reverse=True)
+    return {**summarize(rows), "trades": rows[:recent]}
 
 
 # ---------------------------------------------------------------------- DB loading
@@ -228,6 +254,13 @@ async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) ->
         trades = (await s.scalars(select(Trade).where(Trade.experiment == exp))).all()
         unexpected = (await s.scalars(select(Trade).where(Trade.unexpected.is_(True)))).all()
         navs = (await s.scalars(select(AccountSnapshot.nav).order_by(AccountSnapshot.taken_at))).all()
+        close_reasons = await bot_close_reasons(s)
+        now = utcnow()
+        excursions: dict[int, dict[str, Any] | None] = {}
+        for t in list(trades) + list(unexpected):
+            if t.state == TradeState.CLOSED and t.id not in excursions:
+                ex = await trade_excursion(s, t, now)
+                excursions[t.id] = ex.to_dict() if ex else None
 
     req_by_id = {r.id: r for r in reqs}
     dec_by_req = {d.request_id: d for d in decs}
@@ -254,6 +287,11 @@ async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) ->
                 requested_price=order.requested_price if order else None,
                 fill_price=order.fill_price if order else None,
                 unexpected=t.unexpected,
+                trade_id=t.id,
+                opened_at=t.open_time,
+                closed_at=t.close_time,
+                outcome=close_category(t, close_reasons),
+                excursion=excursions.get(t.id),
             )
         )
 
