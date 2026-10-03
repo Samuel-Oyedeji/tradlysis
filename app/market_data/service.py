@@ -62,7 +62,7 @@ class MarketDataService:
                         backoff = 1.0
                         if was_connected_once:
                             await self.notifier.info(
-                                COMPONENT, "STREAM_RECONNECTED", "Price stream reconnected", alert=True,
+                                COMPONENT, "STREAM_RECONNECTED", "Price stream reconnected",
                                 dedup_key="stream_reconnected",
                             )
                         was_connected_once = True
@@ -82,6 +82,8 @@ class MarketDataService:
                     "STREAM_DISCONNECTED",
                     f"Price stream disconnected: {exc}. Reconnecting in {backoff:.0f}s",
                     details={"reconnects": self.state.reconnects},
+                    # Routine and self-healing: logged only. A real outage alerts as STALE_PRICES.
+                    alert=False,
                     dedup_key="stream_disconnected",
                 )
                 try:
@@ -153,11 +155,12 @@ class MarketDataService:
                     "STALE_PRICES",
                     "No fresh prices during market hours",
                     details=self.state.status(now),
+                    alert=True,
                     dedup_key="stale_prices",
                 )
             elif not stale and self._stale_alerted:
                 self._stale_alerted = False
-                await self.notifier.info(COMPONENT, "PRICES_RECOVERED", "Fresh prices are flowing again")
+                await self.notifier.info(COMPONENT, "PRICES_RECOVERED", "Fresh prices are flowing again", alert=True)
 
     # ------------------------------------------------------------------ candles
 

@@ -20,13 +20,42 @@ _LEVEL_EMOJI = {
     EventLevel.CRITICAL: "🚨",
 }
 
+# Readable Telegram headings for the events that are sent there; anything else falls back to
+# the level emoji and the event type in words.
+_TITLES = {
+    "SETUP": "🔎 Setup found",
+    "TRADE_REJECTED": "⛔ Trade rejected by risk engine",
+    "ORDER_FILLED": "✅ Order filled",
+    "ORDER_REJECTED": "❌ Order rejected by broker",
+    "ORDER_FAILED": "❌ Order failed",
+    "ORDER_HTTP_ERROR": "❌ Order request error",
+    "ORDER_BLOCKED": "⛔ Order blocked",
+    "ORDER_NOT_FOUND": "❌ Order not found at broker",
+    "ORDER_ADOPTED": "🔁 Reconciliation: order matched to broker position",
+    "SLIPPAGE_EXCEEDED": "⚠️ Slippage too high, closing",
+    "TRADE_CLOSED": "🏁 Trade closed",
+    "FLATTENED": "🧹 All positions closed",
+    "UNEXPECTED_POSITION": "🚨 Reconciliation: unknown position at broker",
+    "CLOSE_DETAILS_MISSING": "❌ Reconciliation: close details missing",
+    "RECONCILE_FAILED": "❌ Reconciliation failing",
+    "RECONCILE_RECOVERED": "✅ Reconciliation recovered",
+    "DAILY_LOSS_BREAKER": "🚨 Daily loss limit hit",
+    "DRAWDOWN_BREAKER": "🚨 Drawdown limit hit",
+    "STALE_PRICES": "⚠️ No fresh prices",
+    "PRICES_RECOVERED": "✅ Prices flowing again",
+    "ENGINE_STARTED": "▶️ Engine started",
+    "ENGINE_STOPPED": "⏹ Engine stopped",
+}
+
 
 class Notifier:
     """Single place for "something happened" signals.
 
-    Every event is logged and persisted. Events at WARNING or above, or any event with
-    ``alert=True``, are also sent to Telegram, de-duplicated by ``dedup_key`` so a flapping
-    stream does not flood the chat.
+    Every event is logged and persisted (the dashboard shows them). Only ERROR/CRITICAL events,
+    or events passed ``alert=True``, are also sent to Telegram, so the chat carries setups,
+    executions, reconciliation results and real problems rather than routine noise such as
+    stream reconnects. Pass ``alert=False`` to keep an error off Telegram. Sends are
+    de-duplicated by ``dedup_key``.
     """
 
     def __init__(
@@ -70,7 +99,7 @@ class Notifier:
             except Exception:  # never let logging break trading logic
                 log.exception("Failed to persist system event %s", event_type)
 
-        should_alert = alert if alert is not None else level != EventLevel.INFO
+        should_alert = alert if alert is not None else level in (EventLevel.ERROR, EventLevel.CRITICAL)
         if should_alert:
             await self._alert(level, component, event_type, message, dedup_key or event_type)
 
@@ -85,7 +114,8 @@ class Notifier:
             return
         self._last_sent[key] = now
         prefix = f"{self.label} " if self.label else ""
-        text = f"{_LEVEL_EMOJI.get(level, '')} {prefix}{component} · {event_type}\n{message}"
+        title = _TITLES.get(event_type) or f"{_LEVEL_EMOJI.get(level, '')} {event_type.replace('_', ' ').capitalize()}"
+        text = f"{prefix}{title}\n{message}"
         await self.telegram.send(text)
 
     async def info(self, component: str, event_type: str, message: str, **kw: Any) -> None:

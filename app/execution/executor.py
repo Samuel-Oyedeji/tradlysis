@@ -79,12 +79,12 @@ class OrderExecutor:
                 active, reason = await is_kill_switch_active(s)
             if active:
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason=f"KILL_SWITCH: {reason}")
-                await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", f"Kill switch active: {reason}")
+                await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", f"Kill switch active: {reason}", alert=True)
                 return await self._get(order.id)
             blocked = await self._open_only_violation()
             if blocked:
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason=blocked)
-                await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", blocked)
+                await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", blocked, alert=True)
                 return await self._get(order.id)
             return await self._submit(order.id)
 
@@ -403,7 +403,8 @@ class OrderExecutor:
                 response_payload={**(order.response_payload or {}), "adopted": {"position": p.raw}},
             )
             await self.notifier.warning(
-                COMPONENT, "ORDER_ADOPTED", f"{order.client_order_id} matched to broker position {p.deal_id}; marked FILLED"
+                COMPONENT, "ORDER_ADOPTED", f"{order.client_order_id} matched to broker position {p.deal_id}; marked FILLED",
+                alert=True,
             )
         return await self._get(order.id)
 
@@ -434,7 +435,8 @@ class OrderExecutor:
             if resolved is None:
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason="not found at broker")
                 await self.notifier.warning(
-                    COMPONENT, "ORDER_NOT_FOUND", f"{order.client_order_id} not found at the broker; marked FAILED"
+                    COMPONENT, "ORDER_NOT_FOUND", f"{order.client_order_id} not found at the broker; marked FAILED",
+                    alert=True,
                 )
 
     async def _resolve_close(self, order: Order) -> None:
