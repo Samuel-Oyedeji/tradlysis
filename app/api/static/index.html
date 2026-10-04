@@ -31,13 +31,23 @@
 #open-trades .t th:last-child, #open-trades .t td:last-child { padding-right: 16px; }
 #news .sub { border-top: 1px solid var(--grid); background: var(--panel); }
 svg#nav-chart { height: 260px; }
+/* Open trades / Recent decisions / Closed trades share one panel as tabs. */
+#p-trades .panel-h { padding-top: 0; padding-bottom: 0; flex-wrap: wrap; row-gap: 0; }
+#p-trades .panel-h .seg { margin: 6px 0; }
+#p-trades [hidden] { display: none; }
+.ptabs { display: flex; gap: 2px; margin-bottom: -1px; overflow-x: auto; scrollbar-width: none; }
+.ptabs button { font: 600 13px var(--sans); color: var(--ink-3); background: none; border: 0; border-bottom: 2px solid transparent; padding: 13px 10px 11px; cursor: pointer; white-space: nowrap; }
+.ptabs button:first-child { margin-left: -10px; }
+.ptabs button:hover { color: var(--ink-2); }
+.ptabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.ptabs button:focus-visible { outline-offset: -2px; }
 @media (max-width: 899px) {
   .ov { grid-template-columns: minmax(0, 1fr); }
   .ov > .stack { display: contents; }
   svg#nav-chart { height: 200px; }
   /* Phone order: most operational first. */
-  #p-chart { order: 1; } #p-controls { order: 2; } #p-open { order: 3; } #p-decisions { order: 4; }
-  #p-summary { order: 5; } #p-news { order: 6; } #p-closed { order: 7; } #p-events { order: 8; }
+  #p-chart { order: 1; } #p-controls { order: 2; } #p-trades { order: 3; }
+  #p-summary { order: 4; } #p-news { order: 5; } #p-events { order: 6; }
   /* Decisions become a stacked list on phones: time · decision · confidence, reasons underneath. */
   #decisions table, #decisions tbody { display: block; }
   #decisions thead { display: none; }
@@ -45,7 +55,10 @@ svg#nav-chart { height: 260px; }
   #decisions td { padding: 0; border: 0; }
   #decisions td:nth-child(2) { display: none; }
   #decisions td:nth-child(5) { grid-column: 1 / -1; }
-  #p-decisions .panel-h { flex-wrap: wrap; }
+  /* The three tabs share the width on phones; labels wrap rather than get cut off. */
+  .ptabs { flex: 1 1 100%; margin-left: -8px; margin-right: -8px; }
+  .ptabs button { flex: 1 1 auto; font-size: 12.5px; line-height: 1.25; white-space: normal; padding-left: 2px; padding-right: 2px; }
+  .ptabs button:first-child { margin-left: 0; }
 }
 </style>
 </head>
@@ -79,19 +92,19 @@ svg#nav-chart { height: 260px; }
               <div class="scroll-x" id="chart-table" style="display:none"></div>
             </div>
           </section>
-          <section class="panel" id="p-open">
-            <div class="panel-h"><h2>Open trades</h2><a class="aside" href="/history">History →</a></div>
-            <div class="panel-b flush scroll-x" id="open-trades"></div>
-          </section>
-          <section class="panel" id="p-decisions">
-            <div class="panel-h"><h2>Recent decisions</h2>
-              <div class="seg" role="group" aria-label="Which decisions"><button type="button" data-llm="0" aria-pressed="true">Every 15 min</button><button type="button" data-llm="1" aria-pressed="false">Model-reviewed</button></div>
+          <section class="panel" id="p-trades">
+            <div class="panel-h">
+              <div class="ptabs" role="tablist" aria-label="Trades and decisions">
+                <button type="button" role="tab" id="tab-open" aria-controls="open-trades" aria-selected="true">Open trades</button>
+                <button type="button" role="tab" id="tab-decisions" aria-controls="decisions" aria-selected="false" tabindex="-1">Recent decisions</button>
+                <button type="button" role="tab" id="tab-closed" aria-controls="closed-trades" aria-selected="false" tabindex="-1">Closed trades</button>
+              </div>
+              <a class="aside" href="/history" data-for="open-trades closed-trades">History →</a>
+              <div class="seg" role="group" aria-label="Which decisions" data-for="decisions" hidden><button type="button" data-llm="0" aria-pressed="true">Every 15 min</button><button type="button" data-llm="1" aria-pressed="false">Model-reviewed</button></div>
             </div>
-            <div class="panel-b flush scroll-x" id="decisions"></div>
-          </section>
-          <section class="panel" id="p-closed">
-            <div class="panel-h"><h2>Closed trades</h2><a class="aside" href="/history">All history →</a></div>
-            <div class="panel-b flush scroll-x" id="closed-trades"></div>
+            <div class="panel-b flush scroll-x" id="open-trades" role="tabpanel" aria-labelledby="tab-open"></div>
+            <div class="panel-b flush scroll-x" id="decisions" role="tabpanel" aria-labelledby="tab-decisions" hidden></div>
+            <div class="panel-b flush scroll-x" id="closed-trades" role="tabpanel" aria-labelledby="tab-closed" hidden></div>
           </section>
         </div>
 
@@ -142,6 +155,7 @@ const NEWS_VISIBLE = 5, DECISIONS_VISIBLE = 10, EVENTS_VISIBLE = 5;
 // Show the first `visible` items of a list panel; the rest scroll inside it. `keep` is the
 // scroll position from before the re-render, so the 15 s refresh doesn't jump back to the top.
 function capList(box, selector, visible, keep) {
+  if (box.hidden) { box.style.maxHeight = ""; return box.querySelectorAll(selector).length; }  // measured when its tab opens
   const items = box.querySelectorAll(selector);
   if (items.length <= visible) { box.style.maxHeight = ""; return items.length; }
   const bottom = items[visible - 1].getBoundingClientRect().bottom;
@@ -327,7 +341,24 @@ $("btn-kill").onclick = () => {
 $("btn-flatten").onclick = () => control("/api/controls/flatten", {reason: "dashboard"}, "Close ALL open trades at market price? The engine does this within a few seconds.");
 $("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset the daily loss limit and allow trading again today?");
 $("btn-reset-dd").onclick = () => control("/api/controls/reset-breaker/drawdown", {}, "Reset the drawdown limit? Drawdown will be measured from the current account value.");
-document.querySelectorAll("#p-decisions .seg button").forEach(b => b.onclick = () => { onlyLlm = b.dataset.llm === "1"; document.querySelectorAll("#p-decisions .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
+document.querySelectorAll("#p-trades .seg button").forEach(b => b.onclick = () => { onlyLlm = b.dataset.llm === "1"; document.querySelectorAll("#p-trades .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
+// Trades panel tabs: show one list at a time, plus the header extras that belong to it.
+const tradeTabs = [...document.querySelectorAll("#p-trades [role=tab]")];
+function selectTab(tab) {
+  tradeTabs.forEach(t => { const on = t === tab; t.setAttribute("aria-selected", on); t.tabIndex = on ? 0 : -1; $(t.getAttribute("aria-controls")).hidden = !on; });
+  const id = tab.getAttribute("aria-controls");
+  document.querySelectorAll("#p-trades [data-for]").forEach(el => { el.hidden = !el.dataset.for.split(" ").includes(id); });
+  if (id === "decisions") capList($("decisions"), "tbody tr", DECISIONS_VISIBLE, $("decisions").scrollTop);
+}
+tradeTabs.forEach((t, i) => {
+  t.onclick = () => selectTab(t);
+  t.onkeydown = (e) => {
+    const step = {ArrowRight: 1, ArrowLeft: -1}[e.key];
+    if (!step) return;
+    const next = tradeTabs[(i + step + tradeTabs.length) % tradeTabs.length];
+    selectTab(next); next.focus(); e.preventDefault();
+  };
+});
 document.querySelectorAll("#p-events .seg button").forEach(b => b.onclick = () => { minLevel = b.dataset.lvl; document.querySelectorAll("#p-events .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
 
 refresh(); setInterval(refresh, 15000);
