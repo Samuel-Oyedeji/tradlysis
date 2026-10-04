@@ -31,23 +31,27 @@
 #open-trades .t th:last-child, #open-trades .t td:last-child { padding-right: 16px; }
 #news .sub { border-top: 1px solid var(--grid); background: var(--panel); }
 svg#nav-chart { height: 260px; }
-/* Open trades / Recent decisions / Closed trades share one panel as tabs. */
-#p-trades .panel-h { padding-top: 0; padding-bottom: 0; flex-wrap: wrap; row-gap: 0; }
-#p-trades .panel-h .seg { margin: 6px 0; }
-#p-trades [hidden] { display: none; }
+/* Tabbed panels (trades & decisions; experiments, news & events) show one list at a time. */
+.tabbed .panel-h { padding-top: 0; padding-bottom: 0; flex-wrap: wrap; row-gap: 0; }
+.tabbed .panel-h .seg { margin: 6px 0; }
+.tabbed .panel-h .aside, .tabbed .panel-h .seg { margin-left: auto; }
+.tabbed [hidden] { display: none; }
 .ptabs { display: flex; gap: 2px; margin-bottom: -1px; overflow-x: auto; scrollbar-width: none; }
 .ptabs button { font: 600 13px var(--sans); color: var(--ink-3); background: none; border: 0; border-bottom: 2px solid transparent; padding: 13px 10px 11px; cursor: pointer; white-space: nowrap; }
 .ptabs button:first-child { margin-left: -10px; }
 .ptabs button:hover { color: var(--ink-2); }
 .ptabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
 .ptabs button:focus-visible { outline-offset: -2px; }
+/* The side column is narrow: its tabs take the full width, labels wrap rather than get cut off. */
+#p-info .ptabs { flex: 1 1 100%; margin-left: -8px; margin-right: -8px; }
+#p-info .ptabs button { flex: 1 1 auto; line-height: 1.25; white-space: normal; padding-left: 4px; padding-right: 4px; }
+#p-info .ptabs button:first-child { margin-left: 0; }
 @media (max-width: 899px) {
   .ov { grid-template-columns: minmax(0, 1fr); }
   .ov > .stack { display: contents; }
   svg#nav-chart { height: 200px; }
   /* Phone order: most operational first. */
-  #p-chart { order: 1; } #p-controls { order: 2; } #p-trades { order: 3; }
-  #p-summary { order: 4; } #p-news { order: 5; } #p-events { order: 6; }
+  #p-chart { order: 1; } #p-controls { order: 2; } #p-trades { order: 3; } #p-info { order: 4; }
   /* Decisions become a stacked list on phones: time · decision · confidence, reasons underneath. */
   #decisions table, #decisions tbody { display: block; }
   #decisions thead { display: none; }
@@ -92,7 +96,7 @@ svg#nav-chart { height: 260px; }
               <div class="scroll-x" id="chart-table" style="display:none"></div>
             </div>
           </section>
-          <section class="panel" id="p-trades">
+          <section class="panel tabbed" id="p-trades">
             <div class="panel-h">
               <div class="ptabs" role="tablist" aria-label="Trades and decisions">
                 <button type="button" role="tab" id="tab-open" aria-controls="open-trades" aria-selected="true">Open trades</button>
@@ -123,20 +127,23 @@ svg#nav-chart { height: 260px; }
               <div class="breakers" id="breakers"></div>
             </div>
           </section>
-          <section class="panel" id="p-summary">
-            <div class="panel-h"><h2>Experiment results</h2><span class="aside" id="summary-when"></span></div>
-            <div class="panel-b" id="analysis"><span class="muted">No report yet. The analyzer writes one every hour.</span></div>
-            <div class="panel-b" style="padding-top:0"><a class="btn block" href="/analysis">Experiment analysis →</a></div>
-          </section>
-          <section class="panel" id="p-news">
-            <div class="panel-h"><h2>News · EUR &amp; USD</h2><span class="aside" id="news-aside">next 48h</span></div>
-            <div class="panel-b flush" id="news"></div>
-          </section>
-          <section class="panel" id="p-events">
-            <div class="panel-h"><h2>System events</h2>
-              <div class="seg" role="group" aria-label="Event level"><button type="button" data-lvl="WARNING" aria-pressed="true">Warnings</button><button type="button" data-lvl="INFO" aria-pressed="false">All</button></div>
+          <section class="panel tabbed" id="p-info">
+            <div class="panel-h">
+              <div class="ptabs" role="tablist" aria-label="Experiments, news and system events">
+                <button type="button" role="tab" id="tab-analysis" aria-controls="analysis-tab" aria-selected="true">Experiment results</button>
+                <button type="button" role="tab" id="tab-news" aria-controls="news" aria-selected="false" tabindex="-1">News · EUR &amp; USD</button>
+                <button type="button" role="tab" id="tab-events" aria-controls="events" aria-selected="false" tabindex="-1">System events</button>
+              </div>
+              <span class="aside" id="summary-when" data-for="analysis-tab"></span>
+              <span class="aside" id="news-aside" data-for="news" hidden>next 48h</span>
+              <div class="seg" role="group" aria-label="Event level" data-for="events" hidden><button type="button" data-lvl="WARNING" aria-pressed="true">Warnings</button><button type="button" data-lvl="INFO" aria-pressed="false">All</button></div>
             </div>
-            <div class="panel-b flush" id="events"></div>
+            <div id="analysis-tab" role="tabpanel" aria-labelledby="tab-analysis">
+              <div class="panel-b" id="analysis"><span class="muted">No report yet. The analyzer writes one every hour.</span></div>
+              <div class="panel-b" style="padding-top:0"><a class="btn block" href="/analysis">Experiment analysis →</a></div>
+            </div>
+            <div class="panel-b flush" id="news" role="tabpanel" aria-labelledby="tab-news" hidden></div>
+            <div class="panel-b flush" id="events" role="tabpanel" aria-labelledby="tab-events" hidden></div>
           </section>
         </div>
       </div>
@@ -342,25 +349,28 @@ $("btn-flatten").onclick = () => control("/api/controls/flatten", {reason: "dash
 $("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset the daily loss limit and allow trading again today?");
 $("btn-reset-dd").onclick = () => control("/api/controls/reset-breaker/drawdown", {}, "Reset the drawdown limit? Drawdown will be measured from the current account value.");
 document.querySelectorAll("#p-trades .seg button").forEach(b => b.onclick = () => { onlyLlm = b.dataset.llm === "1"; document.querySelectorAll("#p-trades .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
-// Trades panel tabs: show one list at a time, plus the header extras that belong to it.
-const tradeTabs = [...document.querySelectorAll("#p-trades [role=tab]")];
-function selectTab(tab) {
-  tradeTabs.forEach(t => { const on = t === tab; t.setAttribute("aria-selected", on); t.tabIndex = on ? 0 : -1; $(t.getAttribute("aria-controls")).hidden = !on; });
-  const id = tab.getAttribute("aria-controls");
-  document.querySelectorAll("#p-trades [data-for]").forEach(el => { el.hidden = !el.dataset.for.split(" ").includes(id); });
-  if (id === "decisions") capList($("decisions"), "tbody tr", DECISIONS_VISIBLE, $("decisions").scrollTop);
-}
-tradeTabs.forEach((t, i) => {
-  t.onclick = () => selectTab(t);
-  t.onkeydown = (e) => {
-    const step = {ArrowRight: 1, ArrowLeft: -1}[e.key];
-    if (!step) return;
-    const next = tradeTabs[(i + step + tradeTabs.length) % tradeTabs.length];
-    selectTab(next); next.focus(); e.preventDefault();
+document.querySelectorAll("#p-info .seg button").forEach(b => b.onclick = () => { minLevel = b.dataset.lvl; document.querySelectorAll("#p-info .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
+// Tabbed panels: show one list at a time, plus the header extras (data-for) that belong to it.
+// Capped lists can't be measured while hidden, so they are capped when their tab opens.
+const TAB_CAPS = {decisions: ["tbody tr", DECISIONS_VISIBLE], news: [".news-row", NEWS_VISIBLE], events: [".event", EVENTS_VISIBLE]};
+document.querySelectorAll(".tabbed").forEach(panel => {
+  const tabs = [...panel.querySelectorAll("[role=tab]")];
+  const select = (tab) => {
+    tabs.forEach(t => { const on = t === tab; t.setAttribute("aria-selected", on); t.tabIndex = on ? 0 : -1; $(t.getAttribute("aria-controls")).hidden = !on; });
+    const id = tab.getAttribute("aria-controls");
+    panel.querySelectorAll("[data-for]").forEach(el => { el.hidden = !el.dataset.for.split(" ").includes(id); });
+    if (TAB_CAPS[id]) capList($(id), ...TAB_CAPS[id], $(id).scrollTop);
   };
+  tabs.forEach((t, i) => {
+    t.onclick = () => select(t);
+    t.onkeydown = (e) => {
+      const step = {ArrowRight: 1, ArrowLeft: -1}[e.key];
+      if (!step) return;
+      const next = tabs[(i + step + tabs.length) % tabs.length];
+      select(next); next.focus(); e.preventDefault();
+    };
+  });
 });
-document.querySelectorAll("#p-events .seg button").forEach(b => b.onclick = () => { minLevel = b.dataset.lvl; document.querySelectorAll("#p-events .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
-
 refresh(); setInterval(refresh, 15000);
 </script>
 </body>
