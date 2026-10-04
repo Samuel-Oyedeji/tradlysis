@@ -52,6 +52,9 @@ jobs:
             # when a newer deploy already moved the checkout past this commit.
             git merge --ff-only "$DEPLOY_SHA"
 
+            # Images the running containers use now; removed at the end once the new ones are healthy.
+            old_images=$(docker compose images -q | sort -u)
+
             echo "==> docker compose build"
             docker compose build
 
@@ -86,4 +89,14 @@ jobs:
             done
 
             docker compose ps
+
+            echo "==> removing replaced images"
+            new_images=$(docker compose images -q | sort -u)
+            for id in $old_images; do
+              if ! echo "$new_images" | grep -qx "$id"; then
+                # Only this project's previous images; skipped if anything still uses one.
+                docker image rm "$id" || true
+              fi
+            done
+
             echo "Deployed $(git rev-parse --short HEAD)"

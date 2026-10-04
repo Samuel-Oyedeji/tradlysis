@@ -173,9 +173,12 @@ it (for example Caddy: `your.domain { reverse_proxy 127.0.0.1:8710 }`), or use a
 once CI has passed on it. It SSHes into the server, goes to the checkout, fast-forwards it to
 the commit CI tested, runs `docker compose build` and `docker compose up -d engine api
 analyzer`, then waits for the API health check and checks that `engine` and `analyzer` are
-running. A failure at any step fails the job; the services already running are left as they are
-until `up -d` replaces them. Migrations are not run (see above). The engine reconciles with the
-broker when it starts, so a restart picks up open trades again.
+running. After a healthy deploy it deletes the images the previous containers used, so old
+builds don't fill the disk; images from other projects are not touched. A failure at any step
+fails the job; the services already running are left as they are until `up -d` replaces them.
+Migrations are not run (see above). The engine reconciles with the broker when it starts, so a
+restart picks up open trades again. Work goes to `staging` first; merging `staging` into
+`main` is what deploys.
 
 One-time setup:
 
@@ -192,7 +195,7 @@ One-time setup:
    | `DEPLOY_USER` | the deploy user |
    | `DEPLOY_SSH_KEY` | the whole private key file `tradlysis_deploy` |
    | `DEPLOY_PATH` | absolute path of the checkout, e.g. `/home/ubuntu/tradlysis` |
-   | `DEPLOY_HOST_FINGERPRINT` | output of `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub \| cut -d' ' -f2` run on the server (`SHA256:...`) |
+   | `DEPLOY_HOST_FINGERPRINT` | output of `ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub \| cut -d' ' -f2` run on the server (`SHA256:...`, nothing around it). The deploy action prefers the ECDSA host key over ED25519; if the server has no ECDSA key, use `ssh_host_rsa_key.pub` |
    | `DEPLOY_PORT` | only if SSH is not on port 22 |
 
 4. Delete the local `tradlysis_deploy` private key once it is saved in GitHub.
