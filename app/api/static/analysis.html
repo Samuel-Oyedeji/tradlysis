@@ -82,6 +82,11 @@
         </section>
       </div>
 
+      <section class="panel gap" aria-labelledby="h-nearmiss">
+        <div class="panel-h"><h2 id="h-nearmiss">Setups held back only by risk:reward</h2><span class="aside">what-if replay on real candles · one trade at a time · ignores spread and the model's review</span></div>
+        <div class="panel-b flush scroll-x" id="nearmiss"></div>
+      </section>
+
       <section class="panel gap">
         <div class="panel-h"><h2>Results by condition</h2><span class="aside">closed trades only · R = result ÷ risk taken</span></div>
         <div class="panel-b flush scroll-x" id="groups"></div>
@@ -113,7 +118,7 @@ function renderReport(r) {
     $("asof").textContent = "No report yet";
     ["t-trades", "t-win", "t-avg", "t-pl"].forEach(id => $(id).textContent = "–");
     $("funnel").innerHTML = `<div class="empty">No report yet. Press “Run analysis now”.</div>`;
-    $("reasons").innerHTML = $("groups").innerHTML = "";
+    $("reasons").innerHTML = $("groups").innerHTML = $("nearmiss").innerHTML = "";
     $("execution").innerHTML = "";
     $("outcomes").innerHTML = `<div class="empty">No closed trades yet.</div>`;
     return;
@@ -168,6 +173,7 @@ function renderReport(r) {
     ["Volatility", m.by_market_regime?.volatility],
     ["1h trend", m.by_market_regime?.h1_regime],
     ["Model confidence", m.by_confidence],
+    ["Planned risk:reward", m.by_planned_rr],
     ["News risk", m.by_news_risk],
     ["1h alignment", m.by_setup_condition?.h1_alignment],
     ["Pullback level", m.by_setup_condition?.pullback_level],
@@ -176,6 +182,20 @@ function renderReport(r) {
     ${groups.map(([name, g]) => `<tr class="group"><td colspan="5">${esc(name)}</td></tr>` + Object.entries(g).map(([k, s]) => `<tr><td>${esc(pretty(k))}</td><td class="num">${s.trades}</td><td class="num">${s.win_rate == null ? "–" : fmt(s.win_rate * 100, 0) + "%"}</td><td class="num">${signed(s.avg_r, 2, "R")}</td><td class="num">${signed(s.total_r, 2, "R")}</td></tr>`).join("")).join("")}
   </tbody></table>` : `<div class="empty">No closed trades yet. This fills in as trades finish.</div>`;
   renderOutcomes(m.trade_outcomes);
+  renderNearMisses(m.near_misses);
+}
+
+function renderNearMisses(n) {
+  const rr = n?.rr_only, single = Object.entries(n?.blocked_by_one_rule || {});
+  if (!rr || !rr.candles) {
+    $("nearmiss").innerHTML = `<div class="empty">No setup has been held back by risk:reward alone yet.</div>`;
+    return;
+  }
+  const rows = Object.entries(rr.what_if_min_rr || {}).map(([th, w]) => `<tr><td>MIN_RISK_REWARD=${esc(th)}</td><td class="num">${w.setups}</td><td class="num">${w.would_win}</td><td class="num">${w.would_lose}</td><td class="num">${w.not_resolved}</td><td class="num">${w.total_r == null ? "–" : signed(w.total_r, 2, "R")}</td></tr>`).join("");
+  const blockers = single.map(([k, v]) => `${v} ${esc(pretty(k))}`).join(" · ");
+  const spread = Object.entries(rr.by_planned_rr || {}).map(([k, v]) => `${v} at ${esc(k)}`).join(" · ");
+  $("nearmiss").innerHTML = `<div class="missed"><b>${rr.candles} candle${rr.candles === 1 ? "" : "s"} had a complete setup except for risk:reward</b> (${spread}). <span class="muted">Setups that failed exactly one rule: ${blockers || "–"}.</span></div>
+    <table class="t"><thead><tr><th>If the minimum were</th><th class="num">Extra trades</th><th class="num">Would win</th><th class="num">Would lose</th><th class="num">Not resolved</th><th class="num">Total</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 const OUTCOME_LABEL = {take_profit: "Reached take-profit", stop_loss: "Hit stop-loss", manual: "Closed by you",
