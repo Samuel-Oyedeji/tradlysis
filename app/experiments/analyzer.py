@@ -10,14 +10,16 @@ import argparse
 import asyncio
 import json
 import logging
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 
+from app.api.history import DECISION_BAR, HYPOTHETICAL_HORIZON, hypothetical_outcome, load_bars
 from app.config.settings import Settings, get_settings
 from app.db.bootstrap import auto_create_tables
 from app.db.enums import TradeState
@@ -38,6 +40,9 @@ from app.market_data.timeutil import utcnow
 log = logging.getLogger("tradlysis.analyzer")
 
 CONFIDENCE_BUCKETS = [(0.0, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.01)]
+RR_EDGES = (1.0, 1.2, 1.5, 2.0, 3.0)
+# MIN_RISK_REWARD values the what-if replay of R:R-blocked setups is run at.
+RR_WHAT_IF_THRESHOLDS = (1.0, 1.2, 1.5, 1.8)
 
 
 @dataclass
@@ -141,6 +146,89 @@ def pullback_level_key(t: ClosedTrade) -> str:
     return "other"
 
 
+def planned_rr(strategy: dict[str, Any]) -> float | None:
+    rr = (strategy.get("trade_plan") or {}).get("risk_reward")
+    return float(rr) if rr is not None else None
+
+
+def rr_bucket(rr: float | None) -> str:
+    if rr is None:
+        return "unknown"
+    if rr < RR_EDGES[0]:
+        return f"<{RR_EDGES[0]:.1f}R"
+    for lo, hi in zip(RR_EDGES, RR_EDGES[1:], strict=False):
+        if lo <= rr < hi:
+            return f"{lo:.1f}-{hi:.1f}R"
+    return f"{RR_EDGES[-1]:.1f}R+"
+
+
+def failed_conditions(strategy: dict[str, Any] | None) -> list[str]:
+    return [c.get("name", "") for c in (strategy or {}).get("conditions", []) if not c.get("passed")]
+
+
+def near_misses(requests: Sequence[dict[str, Any]], cooldown: timedelta = timedelta(minutes=60)) -> dict[str, Any]:
+    """Setups that failed exactly one rule, and a what-if replay of those blocked only by R:R.
+
+    Each request may carry ``time`` (decision time) and ``hypothetical`` (the TP/SL walk-forward of
+    its trade plan, see :func:`app.api.history.hypothetical_outcome`). For each threshold the replay
+    keeps one trade at a time, like MAX_OPEN_TRADES=1: a setup is skipped while the previous one
+    would still be open (or within ``cooldown`` of it when its outcome is unknown). Mid prices, no
+    spread, and the model and risk engine could still have said no, so this is an upper bound.
+    """
+    single: Counter[str] = Counter()
+    rr_only: list[dict[str, Any]] = []
+    for r in requests:
+        strategy = r.get("strategy_result") or {}
+        if strategy.get("candidate"):
+            continue
+        failed = failed_conditions(strategy)
+        if len(failed) != 1:
+            continue
+        single[failed[0]] += 1
+        rr = planned_rr(strategy)
+        if failed[0] == "risk_reward" and rr is not None and r.get("time") is not None:
+            rr_only.append({"time": r["time"], "rr": rr, "hypothetical": r.get("hypothetical") or {}})
+    rr_only.sort(key=lambda x: x["time"])
+
+    what_if: dict[str, Any] = {}
+    for threshold in RR_WHAT_IF_THRESHOLDS:
+        busy_until: datetime | None = None
+        rs: list[float] = []
+        counts: Counter[str] = Counter()
+        for x in rr_only:
+            if round(x["rr"], 3) < threshold or (busy_until is not None and x["time"] < busy_until):
+                continue
+            h = x["hypothetical"]
+            result = h.get("result") or "UNKNOWN"
+            counts[result] += 1
+            if result == "WOULD_WIN":
+                rs.append(x["rr"])
+            elif result == "WOULD_LOSE":
+                rs.append(-1.0)
+            if h.get("resolved_at"):
+                busy_until = datetime.fromisoformat(h["resolved_at"]) + DECISION_BAR
+            elif result in ("EXPIRED", "UNRESOLVED"):
+                busy_until = x["time"] + HYPOTHETICAL_HORIZON
+            else:
+                busy_until = x["time"] + cooldown
+        what_if[f"{threshold:g}"] = {
+            "setups": sum(counts.values()),
+            "would_win": counts["WOULD_WIN"],
+            "would_lose": counts["WOULD_LOSE"],
+            "not_resolved": sum(counts.values()) - counts["WOULD_WIN"] - counts["WOULD_LOSE"],
+            "total_r": round(sum(rs), 2) if rs else None,
+            "avg_r": round(sum(rs) / len(rs), 3) if rs else None,
+        }
+    return {
+        "blocked_by_one_rule": dict(single.most_common()),
+        "rr_only": {
+            "candles": len(rr_only),
+            "by_planned_rr": dict(Counter(rr_bucket(x["rr"]) for x in rr_only)),
+            "what_if_min_rr": what_if,
+        },
+    }
+
+
 def compute_metrics(
     *,
     requests: Sequence[dict[str, Any]],
@@ -209,6 +297,8 @@ def compute_metrics(
         "by_news_risk": group_r(closed, lambda t: str(t.snapshot.get("news", {}).get("risk", "unknown"))),
         "by_confidence": group_r(closed, lambda t: confidence_bucket(t.confidence)),
         "by_direction": group_r(closed, lambda t: t.direction),
+        "by_planned_rr": group_r(closed, lambda t: rr_bucket(planned_rr(t.strategy))),
+        "near_misses": near_misses(requests),
         "trade_outcomes": trade_outcomes(closed),
         "execution": {
             "avg_slippage_pips": round(sum(slippages) / len(slippages), 3) if slippages else None,
@@ -256,6 +346,7 @@ async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) ->
         navs = (await s.scalars(select(AccountSnapshot.nav).order_by(AccountSnapshot.taken_at))).all()
         close_reasons = await bot_close_reasons(s)
         now = utcnow()
+        hypo = await _rr_only_hypotheticals(s, settings.instrument, reqs)
         excursions: dict[int, dict[str, Any] | None] = {}
         for t in list(trades) + list(unexpected):
             if t.state == TradeState.CLOSED and t.id not in excursions:
@@ -297,7 +388,13 @@ async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) ->
 
     metrics = compute_metrics(
         requests=[
-            {"snapshot": r.snapshot or {}, "strategy_result": r.strategy_result, "llm_called": r.llm_called}
+            {
+                "snapshot": r.snapshot or {},
+                "strategy_result": r.strategy_result,
+                "llm_called": r.llm_called,
+                "time": r.candle_time + DECISION_BAR,
+                "hypothetical": hypo.get(r.id),
+            }
             for r in reqs
         ],
         decisions=[
@@ -320,6 +417,26 @@ async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) ->
     metrics["experiment"] = exp
     metrics["period_start"] = min((r.created_at for r in reqs), default=None)
     return metrics
+
+
+async def _rr_only_hypotheticals(s: Any, instrument: str, reqs: Sequence[DecisionRequest]) -> dict[int, dict[str, Any]]:
+    """Walk-forward TP/SL outcome of every setup whose only failed rule was risk_reward."""
+    rows = [
+        r for r in reqs
+        if r.trade_plan and not (r.strategy_result or {}).get("candidate")
+        and failed_conditions(r.strategy_result) == ["risk_reward"]
+    ]
+    if not rows:
+        return {}
+    starts = [r.candle_time + DECISION_BAR for r in rows]
+    bars = await load_bars(s, instrument, min(starts), max(starts) + HYPOTHETICAL_HORIZON)
+    times = [b.time for b in bars]
+    out: dict[int, dict[str, Any]] = {}
+    for r, start in zip(rows, starts, strict=True):
+        h = hypothetical_outcome(r.trade_plan, start, bars[bisect_left(times, start):])
+        if h is not None:
+            out[r.id] = h
+    return out
 
 
 async def run_once(db: Database, settings: Settings) -> dict[str, Any]:

@@ -249,6 +249,11 @@ what `python -m app.experiments.analyzer --once` prints, in plain terms:
   from stored 5- and 15-minute candles (mid prices), so it covers past trades too and needs nothing
   recorded while a trade is open. The overview's trade tables and each trade's history timeline
   show the same figures.
+- **setups held back only by risk:reward**: every candle where all the rules passed except
+  `MIN_RISK_REWARD`, replayed on real candles at lower minimums (1.0, 1.2, 1.5, 1.8). For each it
+  shows how many extra trades there would have been and how they would have ended (one trade at a
+  time, mid prices, no model review), so you can see the effect of a lower `MIN_RISK_REWARD` before
+  you change it. Results by condition also split closed trades by their planned risk:reward.
 - a day-by-day timeline of what has run, over the last 7, 30 or 90 days
 
 *Run analysis now* computes and stores a fresh report on demand, so the separate analyzer process
@@ -381,7 +386,8 @@ place orders.
 - wins/losses, average winner and loser in R, expectancy, profit factor, max drawdown (in
   R and account %)
 - performance by setup condition, overall market regime, volatility and trend regime, news risk, model-confidence
-  bucket and direction
+  bucket, direction and planned risk:reward
+- setups that failed exactly one rule, and a what-if replay of those blocked only by risk:reward
 - slippage, spread and LLM latency
 
 ## Tests
