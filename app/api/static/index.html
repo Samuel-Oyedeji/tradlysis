@@ -248,7 +248,7 @@ function renderPipe(s) {
   if (lc.note && lc.request_id == null) {
     steps.push(step("Setup", "off", "Skipped", esc(lc.note), true));
   } else {
-    steps.push(step("Setup", lc.candidate ? "pass" : "fail", lc.candidate ? "Found" : "No setup", lc.candidate ? "trend pullback" : "rules not met"));
+    steps.push(step("Setup", lc.candidate ? "pass" : "fail", lc.candidate ? "Found" : "No setup", lc.candidate ? pretty((s.experiment_info || {}).strategy || "setup") : "rules not met"));
   }
   const tradeDecision = lc.decision === "BUY" || lc.decision === "SELL";
   if (!lc.llm_called) steps.push(step("Model", "off", "Not asked", lc.candidate ? "blocked before model" : "no setup to confirm", true));

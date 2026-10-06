@@ -113,7 +113,18 @@ async def test_experiments_are_created_and_validated(db):
                               strategy_result={}))
     with pytest.raises(ConfigError, match="cannot change"):
         await store.save_experiment(db, base, "gbp-pullback", ExperimentInput(instrument="EUR_USD"), "a")
+    with pytest.raises(ConfigError, match="strategy cannot change"):
+        await store.save_experiment(db, base, "gbp-pullback", ExperimentInput(strategy="range_breakout"), "a")
+    with pytest.raises(ConfigError, match="strategy: one of"):
+        await store.save_experiment(db, base, "gbp-pullback", ExperimentInput(strategy="martingale"), "a")
 
     await store.set_experiment_capital(db, "gbp-pullback", Decimal("1"), "engine")
     assert (await store.load_configuration(db, base)).get("gbp-pullback").capital == Decimal("5000"), \
         "the engine only fills in a missing capital"
+
+
+def test_strategy_settings_are_tagged():
+    assert store.STRATEGIES == {"trend_pullback": "Trend pullback", "range_breakout": "Range breakout"}
+    assert store.FIELD_BY_KEY["breakout_range_bars"].strategies == ("range_breakout",)
+    assert store.FIELD_BY_KEY["strategy_pullback_lookback_bars"].strategies == ("trend_pullback",)
+    assert store.FIELD_BY_KEY["min_risk_reward"].strategies == ()

@@ -146,7 +146,7 @@ async def test_candidate_confirmed_approved_and_executed(db, monkeypatch):
         rc = await s.scalar(select(RiskCheck))
         order = await s.scalar(select(Order))
         trade = await s.scalar(select(Trade))
-    assert req.llm_called and req.model == "typesafe/jev-1.13" and req.prompt_version == "decision-v3"
+    assert req.llm_called and req.model == "typesafe/jev-1.13" and req.prompt_version == "decision-v4"
     assert req.messages[0]["role"] == "questions"
     dec = await _decision(db)
     assert dec.confidence == pytest.approx(0.8) and dec.prompt_tokens == 900
@@ -201,8 +201,8 @@ async def make_multi_engine(db, broker, llm, experiments: dict[str, dict]) -> Tr
     base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
     config = Configuration(settings=base, experiments=[
         ExperimentConfig(id=i, slug=slug, name=slug.upper(), description=None, instrument="EUR_USD",
-                         strategy="trend_pullback", enabled=True, capital=None, overrides=over,
-                         settings=experiment_settings(base, slug, "EUR_USD", over))
+                         strategy=over.pop("_strategy", "trend_pullback"), enabled=True, capital=None,
+                         overrides=over, settings=experiment_settings(base, slug, "EUR_USD", over))
         for i, (slug, over) in enumerate(experiments.items())
     ])
     engine = TradingEngine(base, configuration=config, db=db, client=make_client(broker), llm=llm,
@@ -311,3 +311,39 @@ async def test_waiting_engine_publishes_why(db, monkeypatch):
     assert hb["state"] == "WAITING" and "CAPITAL_DEMO_API_KEY" in hb["reason"]
     await store.save_global(db, base, {"capital_demo_api_key": "k"}, "test")
     await asyncio.wait_for(task, 2)
+
+
+async def test_breakout_and_pullback_experiments_ask_their_own_questions(db, monkeypatch):
+    from app.strategy import range_breakout
+    from tests.test_range_breakout import SETTINGS, tech
+
+    broker = FakeBroker(hedging_mode=True)
+    candle_time = floor_time(utcnow(), "M15") - timedelta(minutes=15)
+    seed_candles(broker, candle_time)
+    real = range_breakout.evaluate_range_breakout
+    # The breakout experiment sees the hand-made upside break; the pullback experiment the real (no) setup.
+    monkeypatch.setattr("app.engine.evaluate_range_breakout",
+                        lambda t, bid, ask, s: real(tech(), bid, ask, SETTINGS))
+    calls = []
+    answers = {"decision": {"type": "choice", "choice": "BUY", "probabilities": {"BUY": 0.8, "WAIT": 0.2}},
+               "range_clear": {"type": "noul", "noul": 0.9}, "breakout_decisive": {"type": "noul", "noul": 0.9}}
+    engine = await make_multi_engine(db, broker, llm_client(answers, calls), {
+        "eurusd-breakout": {"_strategy": "range_breakout", "min_risk_reward": "1.5"},
+        "eurusd-pullback": {},
+    })
+    summaries = await engine.run_cycle(candle_time)
+    breakout, pullback = summaries["eurusd-breakout"], summaries["eurusd-pullback"]
+    assert breakout.candidate and breakout.decision == "BUY" and breakout.order_status == "FILLED", breakout
+    assert not pullback.llm_called and pullback.decision == "WAIT"
+    [sent] = calls
+    assert "range_clear" in sent["questions"] and "RANGE_BREAKOUT" in sent["questions"]["decision"]["instructions"]
+    assert sent["state"]["setup_check"]["context"]["range_high"] == 1.104
+    assert sent["state"]["market_regime"]["suits_setup"] in (True, False)
+    async with db.session() as s:
+        req = await s.scalar(select(DecisionRequest).where(DecisionRequest.experiment == "eurusd-breakout"))
+        dec = await s.scalar(select(Decision).where(Decision.request_id == req.id))
+        trade = await s.scalar(select(Trade))
+    assert req.prompt_version == "breakout-v1" and dec.setup == "RANGE_BREAKOUT"
+    assert dec.reason_codes == ["RANGE_DEFINED", "BREAKOUT_CONFIRMED"]
+    assert trade.experiment == "eurusd-breakout"
+    assert (await _setup_events(db)) == ["BUY EUR_USD"]

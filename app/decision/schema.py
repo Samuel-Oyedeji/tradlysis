@@ -15,6 +15,7 @@ class Action(StrEnum):
 
 class Setup(StrEnum):
     TREND_PULLBACK = "TREND_PULLBACK"
+    RANGE_BREAKOUT = "RANGE_BREAKOUT"
     NONE = "NONE"
 
 
@@ -22,11 +23,16 @@ class ReasonCode(StrEnum):
     HTF_BULLISH = "HTF_BULLISH"
     HTF_BEARISH = "HTF_BEARISH"
     HTF_UNCLEAR = "HTF_UNCLEAR"
+    HTF_OPPOSES = "HTF_OPPOSES"
     H1_ALIGNED = "H1_ALIGNED"
     H1_CONFLICT = "H1_CONFLICT"
     PULLBACK_TO_SUPPORT = "PULLBACK_TO_SUPPORT"
     PULLBACK_TO_RESISTANCE = "PULLBACK_TO_RESISTANCE"
     NO_PULLBACK = "NO_PULLBACK"
+    RANGE_DEFINED = "RANGE_DEFINED"
+    RANGE_UNCLEAR = "RANGE_UNCLEAR"
+    BREAKOUT_CONFIRMED = "BREAKOUT_CONFIRMED"
+    BREAKOUT_WEAK = "BREAKOUT_WEAK"
     MOMENTUM_CONFIRMED = "MOMENTUM_CONFIRMED"
     MOMENTUM_WEAK = "MOMENTUM_WEAK"
     STRUCTURE_INTACT = "STRUCTURE_INTACT"
@@ -57,8 +63,8 @@ class DecisionOut(BaseModel):
 
     @model_validator(mode="after")
     def _consistent(self) -> DecisionOut:
-        if self.decision != Action.WAIT and self.setup != Setup.TREND_PULLBACK:
-            raise ValueError("BUY/SELL requires setup TREND_PULLBACK")
+        if self.decision != Action.WAIT and self.setup == Setup.NONE:
+            raise ValueError("BUY/SELL requires a setup")
         return self
 
 

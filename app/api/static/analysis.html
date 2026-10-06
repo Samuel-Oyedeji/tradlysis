@@ -177,6 +177,8 @@ function renderReport(r) {
     ["News risk", m.by_news_risk],
     ["1h alignment", m.by_setup_condition?.h1_alignment],
     ["Pullback level", m.by_setup_condition?.pullback_level],
+    ["Range height (breakout)", m.by_setup_condition?.range_height],
+    ["4h trend at the break", m.by_setup_condition?.htf_trend],
   ].filter(([, g]) => g && Object.keys(g).length);
   $("groups").innerHTML = groups.length ? `<table class="t"><thead><tr><th>Condition</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Average</th><th class="num">Total</th></tr></thead><tbody>
     ${groups.map(([name, g]) => `<tr class="group"><td colspan="5">${esc(name)}</td></tr>` + Object.entries(g).map(([k, s]) => `<tr><td>${esc(pretty(k))}</td><td class="num">${s.trades}</td><td class="num">${s.win_rate == null ? "–" : fmt(s.win_rate * 100, 0) + "%"}</td><td class="num">${signed(s.avg_r, 2, "R")}</td><td class="num">${signed(s.total_r, 2, "R")}</td></tr>`).join("")).join("")}

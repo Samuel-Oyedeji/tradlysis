@@ -213,11 +213,20 @@ async def test_config_page_needs_its_own_password(db):
         assert r.status_code == 200
         r = await c.put("/api/config/experiments/gbp", json={"enabled": True}, auth=AUTH, headers=h)
         assert r.json()["changed"] == ["enabled"]
+        r = await c.post("/api/config/experiments", json={"slug": "gbp-breakout", "name": "GBP breakout",
+                                                          "instrument": "GBP_USD", "strategy": "range_breakout",
+                                                          "settings": {"breakout_range_bars": "24"}},
+                         auth=AUTH, headers=h)
+        assert r.status_code == 200, r.text
         cfg = (await c.get("/api/config", auth=AUTH, headers=h)).json()
         [gbp] = [e for e in cfg["experiments"] if e["slug"] == "gbp"]
         risk = next(f for f in gbp["fields"] if f["key"] == "risk_per_trade_pct")
         assert gbp["enabled"] and risk["value"] == "0.3" and risk["source"] == "app"
-        assert cfg["version"] == 3 and cfg["changes"][0]["key"] == "enabled"
+        keys = {e["slug"]: {f["key"] for f in e["fields"]} for e in cfg["experiments"]}
+        assert "breakout_range_bars" in keys["gbp-breakout"] and "strategy_pullback_lookback_bars" not in keys["gbp-breakout"]
+        assert "strategy_pullback_lookback_bars" in keys["gbp"] and "breakout_range_bars" not in keys["gbp"]
+        assert cfg["strategies"]["range_breakout"] == "Range breakout"
+        assert cfg["version"] == 4 and cfg["changes"][0]["scope"] == "gbp-breakout"
 
         await c.post("/api/config/lock", auth=AUTH, headers=h)
         assert (await c.get("/api/config", auth=AUTH, headers=h)).status_code == 401

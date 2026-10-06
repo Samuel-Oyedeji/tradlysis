@@ -911,6 +911,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             return {
                 "key": f.key, "env": f.key.upper(), "group": f.group, "label": f.label, "help": f.help,
                 "kind": f.kind, "choices": list(f.choices), "secret": f.secret, "source": source,
+                "strategies": list(f.strategies),
                 # Secrets are never sent back; only whether one is set.
                 "value": None if f.secret else value,
                 "is_set": bool(value),
@@ -929,7 +930,11 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             "experiments": [
                 {
                     **e.summary(),
-                    "fields": [field_view(f, e.settings, e.overrides, "global") for f in exp_fields],
+                    "fields": [
+                        field_view(f, e.settings, e.overrides, "global")
+                        for f in exp_fields
+                        if not f.strategies or e.strategy in f.strategies
+                    ],
                 }
                 for e in config.experiments
             ],

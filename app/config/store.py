@@ -36,11 +36,12 @@ from app.db.control import get_control, scoped, set_control
 from app.db.enums import ControlKey
 from app.db.models import AppConfig, ConfigChange, Experiment
 from app.db.session import Database
+from app.strategy.registry import STRATEGIES as STRATEGY_SPECS
 
 GLOBAL_SCOPE = "global"
 EXPERIMENT_SCOPE = "experiment"
 SECRET_MASK = "(secret)"
-STRATEGIES = {"trend_pullback": "Trend pullback"}
+STRATEGIES = {key: spec.label for key, spec in STRATEGY_SPECS.items()}
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 INSTRUMENT_RE = re.compile(r"^[A-Z]{3}_[A-Z]{3}$")
 IMPORT_LOCK_KEY = 7_214_990_332
@@ -70,6 +71,11 @@ class FieldInfo:
     secret: bool = False
     kind: str = "text"  # text | number | bool | choice
     choices: tuple[str, ...] = ()
+    strategies: tuple[str, ...] = ()  # experiment settings used only by these strategies (empty: all)
+
+
+_TP = ("trend_pullback",)
+_RB = ("range_breakout",)
 
 
 def _g(key: str, group: str, label: str, help: str = "", **kw: Any) -> FieldInfo:
@@ -110,7 +116,9 @@ FIELDS: tuple[FieldInfo, ...] = (
     _g("openrouter_app_url", "Decision model", "App URL sent to OpenRouter"),
     _g("openrouter_app_name", "Decision model", "App name sent to OpenRouter"),
     _g("news_calendar_url", "News", "Economic calendar URL", "ForexFactory weekly JSON feed."),
-    _g("news_rss_feeds", "News", "Central-bank RSS feeds", 'Comma-separated "CURRENCY|url" pairs.'),
+    _g("news_rss_feeds", "News", "Central-bank RSS feeds",
+       'Comma-separated "CURRENCY|url" pairs, one per currency the experiments trade, e.g. '
+       "GBP|https://www.bankofengland.co.uk/rss/news for the Bank of England."),
     _g("news_interpretation_enabled", "News", "Interpret news with the model", kind="bool"),
     _g("news_bias_lookback_hours", "News", "Bias lookback (h)", kind="number"),
     _g("news_calendar_poll_minutes", "News", "Calendar poll (min)", kind="number"),
@@ -147,10 +155,28 @@ FIELDS: tuple[FieldInfo, ...] = (
     _e("news_blackout_after_minutes", "News rules", "Blackout after event (min)", kind="number"),
     _e("news_blocking_impacts", "News rules", "Blocking impacts", "Comma-separated, e.g. HIGH or HIGH,MEDIUM."),
     _e("news_require_fresh_calendar", "News rules", "Require a fresh calendar", kind="bool"),
-    _e("strategy_pullback_lookback_bars", "Strategy", "Pullback lookback (bars)", kind="number"),
-    _e("strategy_level_tolerance_atr", "Strategy", "Level tolerance (ATR)", kind="number"),
-    _e("strategy_stop_buffer_atr", "Strategy", "Stop buffer (ATR)", kind="number"),
-    _e("strategy_fallback_target_r", "Strategy", "Fallback target (R)", kind="number"),
+    _e("strategy_pullback_lookback_bars", "Strategy", "Pullback lookback (M15 bars)", kind="number",
+       strategies=_TP),
+    _e("strategy_level_tolerance_atr", "Strategy", "Level tolerance (ATR)", kind="number", strategies=_TP),
+    _e("strategy_stop_buffer_atr", "Strategy", "Stop buffer (ATR)", kind="number", strategies=_TP),
+    _e("strategy_fallback_target_r", "Strategy", "Fallback target (R)", "When no opposing level is found.",
+       kind="number", strategies=_TP),
+    _e("breakout_range_bars", "Strategy", "Range length (H1 bars)", "Completed 1h bars that form the range (5-28).",
+       kind="number", strategies=_RB),
+    _e("breakout_min_range_atr", "Strategy", "Min range height (H1 ATR)", "Narrower ranges are noise.",
+       kind="number", strategies=_RB),
+    _e("breakout_max_range_atr", "Strategy", "Max range height (H1 ATR)", "Wider ones are a trend leg, not a range.",
+       kind="number", strategies=_RB),
+    _e("breakout_min_touches", "Strategy", "Min visits to each edge", kind="number", strategies=_RB),
+    _e("breakout_buffer_atr", "Strategy", "Break beyond the edge (M15 ATR)",
+       "How far the 15m close must be beyond the range.", kind="number", strategies=_RB),
+    _e("breakout_min_body_atr", "Strategy", "Min breakout candle body (M15 ATR)", kind="number", strategies=_RB),
+    _e("breakout_fresh_bars", "Strategy", "Fresh-break window (M15 bars)",
+       "Earlier 15m candles that must not have closed beyond the range already.", kind="number", strategies=_RB),
+    _e("breakout_stop_range_frac", "Strategy", "Stop inside the range (fraction)",
+       "0.3 = stop 30% of the range height back inside it.", kind="number", strategies=_RB),
+    _e("breakout_target_range_mult", "Strategy", "Target (range heights)",
+       "1.0 = the measured move: one range height beyond the edge.", kind="number", strategies=_RB),
     _e("strategy_max_target_r", "Strategy", "Max target (R)", kind="number"),
     _e("openrouter_model", "Decision model", "Model", "Jev (typesafe/jev-1.13) or a chat model id."),
     _e("llm_call_policy", "Decision model", "When to call the model",
@@ -479,6 +505,8 @@ async def save_experiment(
         if data.strategy is not None:
             if data.strategy not in STRATEGIES:
                 raise ConfigError(f"strategy: one of {', '.join(STRATEGIES)}")
+            if not create and data.strategy != row.strategy and await _has_history(s, slug):
+                raise ConfigError("strategy cannot change once the experiment has run; create a new experiment")
             after["strategy"] = data.strategy
         if data.enabled is not None:
             after["enabled"] = bool(data.enabled)

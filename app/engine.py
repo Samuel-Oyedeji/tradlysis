@@ -64,7 +64,10 @@ from app.reconciliation.reconciler import ExperimentBook, Reconciler
 from app.risk.conversion import conversion_rates
 from app.risk.engine import OpenTradeRisk, RiskContext, RiskResult, evaluate
 from app.snapshot.builder import build_snapshot
-from app.strategy.trend_pullback import StrategyResult, evaluate_trend_pullback
+from app.strategy.base import StrategyResult
+from app.strategy.range_breakout import evaluate_range_breakout
+from app.strategy.registry import STRATEGIES
+from app.strategy.trend_pullback import evaluate_trend_pullback
 from app.technicals.engine import TechnicalState, compute_technical_state, persist_technical_state
 
 log = logging.getLogger("tradlysis.engine")
@@ -117,7 +120,7 @@ def startup_problem(config: Configuration) -> str | None:
         config.settings.require_broker_credentials()
     except RuntimeError as exc:
         return f"{exc}; add them on the config page"
-    unknown = [e.slug for e in config.enabled if e.strategy != "trend_pullback"]
+    unknown = [e.slug for e in config.enabled if e.strategy not in STRATEGIES]
     if unknown:
         return f"unknown strategy for {', '.join(unknown)}"
     return None
@@ -502,7 +505,10 @@ class ExperimentRunner:
         self.settings = exp.settings
         self.notifier = engine.notifier.for_experiment(exp.slug, exp.name)
         s = self.settings
-        self.decider = DecisionService(engine.llm, s.openrouter_model, s.llm_max_tokens, s.llm_temperature)
+        self.strategy = STRATEGIES[exp.strategy]
+        self.decider = DecisionService(
+            engine.llm, s.openrouter_model, s.llm_max_tokens, s.llm_temperature, self.strategy.prompt
+        )
         self.last_cycle: CycleSummary | None = None
 
     def status(self) -> dict[str, Any]:
@@ -559,7 +565,7 @@ class ExperimentRunner:
                 )
 
         # Strategy + snapshot.
-        strategy = evaluate_trend_pullback(tech, tick.bid, tick.ask, s)
+        strategy = evaluate_strategy(self.exp.strategy, tech, tick.bid, tick.ask, s)
         summary.candidate = strategy.candidate
         snapshot = build_snapshot(
             tech=tech, tick=tick, news=news, strategy=strategy, decision_time=now, market_regime=regime
@@ -820,6 +826,15 @@ class ExperimentRunner:
             news_blackout_titles=[e["title"] for e in news.blackout_events],
             calendar_fresh=news.calendar_fresh,
         )
+
+
+def evaluate_strategy(name: str, tech: TechnicalState, bid: float, ask: float, settings: Settings) -> StrategyResult:
+    """Run an experiment's deterministic strategy (looked up at call time, so tests can patch them)."""
+    if name == "range_breakout":
+        return evaluate_range_breakout(tech, bid, ask, settings)
+    if name == "trend_pullback":
+        return evaluate_trend_pullback(tech, bid, ask, settings)
+    raise ValueError(f"unknown strategy {name!r}")
 
 
 def _setup_message(instrument: str, strategy: StrategyResult, outcome: DecisionOutcome) -> str:

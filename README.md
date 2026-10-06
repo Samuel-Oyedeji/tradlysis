@@ -378,7 +378,8 @@ place orders.
    - **Overall market regime** (deterministic): strong uptrend, strong downtrend, breakout,
      compression, range, event risk or unclear. The trend-pullback setup suits the strong
      trends; the analyzer reports results per regime.
-4. **Trend-pullback check** (deterministic, `app/strategy/trend_pullback.py`):
+4. **Strategy check** (deterministic), with the experiment's own strategy and parameters.
+   **Trend pullback** (`app/strategy/trend_pullback.py`):
    - H4 trend sets the direction.
    - H1 trend must not oppose it.
    - M15 price has pulled back into a support/resistance zone or the M15 EMA50, by at least
@@ -387,6 +388,20 @@ place orders.
    - Stop sits beyond the pullback plus 0.25 ATR; the target is the next opposing level
      (or 2R), capped at 4R.
    - The setup needs R:R of at least 1:2 (Experiment #1).
+
+   **Range breakout** (`app/strategy/range_breakout.py`) trades what the pullback skips: a range
+   that resolves into a breakout.
+   - Range: the 20 completed H1 bars before the latest one, 1.5–6× ATR(H1) tall, with at least
+     two separate visits to each edge.
+   - Break: the latest M15 candle closes beyond the edge by 0.1× ATR(M15), with a body of at least
+     0.5× ATR(M15), closing in the outer third of its range.
+   - Fresh: none of the 4 M15 candles before it closed beyond the edge (no chasing).
+   - The H4 trend does not point against the break.
+   - Stop 30% of the range height back inside it; target the measured move (one range height
+     beyond the edge), capped at 4R. Stop distance and the experiment's minimum R:R apply.
+     These plans usually land around 1.2–2R, so run breakout experiments with a minimum R:R
+     of about 1.5.
+   All of these are experiment settings on the Config page.
 5. **Market snapshot** is built and stored in `decision_requests` (unique per candle, so a
    restart never processes a candle twice).
 6. **Decision model**: Jev through OpenRouter's Decisions API (`POST /api/alpha/decisions`).
@@ -452,8 +467,24 @@ Two experiments on the same pair need the account's **hedging mode** on to hold 
 the same time (see *Broker: Capital.com*); with it off, the first one to open a position blocks
 the others until it closes. `python -m app.doctor` warns about this.
 
-Only the trend-pullback strategy exists today. Another kind of experiment on the same pair
-needs its own strategy module; an experiment's `strategy` field selects it.
+Two strategies exist: **trend pullback** and **range breakout** (see *How a decision is made*).
+An experiment's strategy is chosen when it is created and is fixed once it has made a decision.
+Each strategy has its own questions for the model (`app/decision/prompts.py`, versioned
+separately). A new strategy is a module in `app/strategy/` returning a `StrategyResult`, a
+`DecisionPrompt`, an entry in `app/strategy/registry.py` and a branch in
+`app.engine.evaluate_strategy`.
+
+Example line-up, all on one account with hedging mode on:
+
+| Experiment | Pair | Strategy | Suggested changes from the defaults |
+|---|---|---|---|
+| `v1-trend-pullback-eur-usd` | EUR/USD | trend pullback | (V1) |
+| `gbpusd-pullback` | GBP/USD | trend pullback | copy V1's parameters; max spread 2.0 pips |
+| `eurusd-breakout` | EUR/USD | range breakout | min R:R 1.5 |
+| `gbpusd-breakout` | GBP/USD | range breakout | min R:R 1.5; max spread 2.0 pips |
+
+For GBP experiments the news settings need a Bank of England feed (`GBP|https://www.bankofengland.co.uk/rss/news`,
+the default for new installations); `python -m app.doctor` names any traded currency without one.
 
 **Going live** uses the same model: point the live credentials at the one live account and
 enable the experiments that should trade it. Each keeps its own capital and limits, so set
@@ -519,8 +550,8 @@ app/
   technicals/      indicators, structure, levels, regimes, technical state
   news/            calendar/RSS providers, LLM interpretation, news state
   snapshot/        market snapshot builder
-  strategy/        deterministic trend-pullback rules and trade plan
-  decision/        OpenRouter client (Decisions API + chat), prompts/questions (versioned), schema
+  strategy/        deterministic strategies (trend pullback, range breakout), trade plans, registry
+  decision/        OpenRouter client (Decisions API + chat), prompts/questions per strategy (versioned), schema
   risk/            deterministic risk engine and currency conversion
   execution/       order executor (only component that submits orders)
   reconciliation/  broker ↔ database reconciliation and circuit breakers

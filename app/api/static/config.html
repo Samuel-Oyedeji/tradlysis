@@ -206,7 +206,7 @@ function experimentForm(e) {
       <div class="field"><label for="${key}-name">Name</label><div><input class="inp" id="${key}-name" value="${esc(e.name)}" maxlength="80"></div></div>
       <div class="field"><label for="${key}-desc">Description</label><div><input class="inp" id="${key}-desc" value="${esc(e.description || "")}" maxlength="500" style="font-family:var(--sans)"></div></div>
       <div class="field"><label for="${key}-inst">Instrument</label><div><input class="inp" id="${key}-inst" value="${esc(e.instrument)}" maxlength="7"><div class="help">Fixed once the experiment has made a decision; create a new experiment for another pair.</div></div></div>
-      <div class="field"><label for="${key}-strategy">Strategy</label><div><select class="inp" id="${key}-strategy">${strategies}</select></div></div>
+      <div class="field"><label for="${key}-strategy">Strategy</label><div><select class="inp" id="${key}-strategy">${strategies}</select><div class="help">Fixed once the experiment has made a decision. Its own settings appear under Strategy after saving.</div></div></div>
       <div class="field"><label for="${key}-capital">Capital<span class="env">account currency</span></label><div><input class="inp" id="${key}-capital" value="${esc(e.capital ?? "")}" inputmode="decimal" placeholder="empty = the account balance when it starts"><div class="help">Its own starting capital. Equity = capital + the P/L of its trades; position size and loss limits use it.</div></div></div>
       ${block.html}
       ${saveBar(key, "Save experiment")}
@@ -237,6 +237,7 @@ function newExperimentForm() {
   $("new-exp").innerHTML = `<form id="new">
     <div class="field"><label for="new-slug">Id<span class="env">permanent</span></label><div><input class="inp" id="new-slug" placeholder="gbpusd-pullback" maxlength="63" required pattern="[a-z0-9][a-z0-9-]{1,62}"><div class="help">Lower-case letters, digits and "-". Stored with every decision and trade; it can't change later.</div></div></div>
     <div class="field"><label for="new-name">Name</label><div><input class="inp" id="new-name" placeholder="GBP/USD trend pullback" maxlength="80" required style="font-family:var(--sans)"></div></div>
+    <div class="field"><label for="new-strategy">Strategy</label><div><select class="inp" id="new-strategy">${Object.entries(cfg.strategies).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div></div>
     <div class="field"><label for="new-inst">Instrument</label><div><input class="inp" id="new-inst" placeholder="GBP_USD" maxlength="7" required><div class="help">A Capital.com currency pair. Add the central bank's RSS feed under Global settings → News if it is not there yet.</div></div></div>
     <div class="field"><label for="new-capital">Capital</label><div><input class="inp" id="new-capital" inputmode="decimal" placeholder="empty = the account balance when it starts"></div></div>
     <div class="field"><label for="new-copy">Copy parameters from</label><div><select class="inp" id="new-copy"><option value="">nothing (global defaults)</option>${options}</select><div class="help">Risk limits, strategy and model settings. Change them after creating it. New experiments start switched off.</div></div></div>
@@ -246,11 +247,14 @@ function newExperimentForm() {
     ev.preventDefault();
     submit("new", async () => {
       const src = cfg.experiments.find(e => e.slug === $("new-copy").value);
+      const strategy = $("new-strategy").value;
       const settings = {};
-      if (src) src.fields.filter(f => f.source === "app").forEach(f => { settings[f.key] = f.value; });
+      // Copy the source's saved parameters that apply to the new experiment's strategy.
+      if (src) src.fields.filter(f => f.source === "app" && (!f.strategies.length || f.strategies.includes(strategy)))
+        .forEach(f => { settings[f.key] = f.value; });
       const r = await capi("/api/config/experiments", {method: "POST", body: JSON.stringify({
         slug: $("new-slug").value.trim(), name: $("new-name").value.trim(), instrument: $("new-inst").value.trim(),
-        capital: $("new-capital").value.trim(), strategy: "trend_pullback", settings,
+        capital: $("new-capital").value.trim(), strategy, settings,
       })});
       return {changed: [`created ${r.slug} (switched off)`]};
     });

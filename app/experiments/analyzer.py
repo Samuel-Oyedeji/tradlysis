@@ -140,6 +140,37 @@ def h1_alignment_key(t: ClosedTrade) -> str:
     return "h1_fully_aligned" if "fully aligned" in _cond_detail(t.strategy, "h1_alignment") else "h1_neutral"
 
 
+def range_height_key(t: ClosedTrade) -> str:
+    """Range breakout: how tall the broken range was, in H1 ATR."""
+    h = (t.strategy.get("context") or {}).get("range_height_atr")
+    if h is None:
+        return "unknown"
+    return "under_2_atr" if h < 2 else "2_to_4_atr" if h < 4 else "4_atr_plus"
+
+
+def htf_trend_key(t: ClosedTrade) -> str:
+    """Range breakout: the H4 trend at the break (with it, or neutral)."""
+    detail = _cond_detail(t.strategy, "htf_not_opposing")
+    for trend in ("BULLISH", "BEARISH", "NEUTRAL"):
+        if trend in detail:
+            return f"h4_{trend.lower()}"
+    return "unknown"
+
+
+def setup_conditions(closed: Sequence[ClosedTrade]) -> dict[str, Any]:
+    """Results by the conditions of the experiment's setup (an experiment runs one strategy)."""
+    pullback = [t for t in closed if t.strategy.get("setup", "TREND_PULLBACK") == "TREND_PULLBACK"]
+    breakout = [t for t in closed if t.strategy.get("setup") == "RANGE_BREAKOUT"]
+    out: dict[str, Any] = {}
+    if pullback:
+        out["h1_alignment"] = group_r(pullback, h1_alignment_key)
+        out["pullback_level"] = group_r(pullback, pullback_level_key)
+    if breakout:
+        out["range_height"] = group_r(breakout, range_height_key)
+        out["htf_trend"] = group_r(breakout, htf_trend_key)
+    return out
+
+
 def pullback_level_key(t: ClosedTrade) -> str:
     detail = _cond_detail(t.strategy, "pullback_to_level")
     for token in ("SWING_CLUSTER", "PREV_DAY", "PREV_WEEK", "PREV_MONTH", "ROUND_NUMBER", "M15_EMA50"):
@@ -287,10 +318,7 @@ def compute_metrics(
         "close_reasons": dict(Counter(t.close_reason or "UNKNOWN" for t in closed)),
         "unexpected_trades": sum(1 for t in trades if t.unexpected),
         "account_max_drawdown_pct": nav_drawdown_pct(navs),
-        "by_setup_condition": {
-            "h1_alignment": group_r(closed, h1_alignment_key),
-            "pullback_level": group_r(closed, pullback_level_key),
-        },
+        "by_setup_condition": setup_conditions(closed),
         "by_market_regime": {
             "overall": group_r(closed, lambda t: str((t.snapshot.get("market_regime") or {}).get("label", "UNKNOWN"))),
             "volatility": group_r(closed, lambda t: str(t.snapshot.get("volatility", {}).get("regime", "UNKNOWN"))),

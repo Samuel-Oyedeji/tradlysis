@@ -1,6 +1,7 @@
 # Tradlysis – notes for AI assistants
 
-- Spec: V1 of an AI-assisted FX/CFD bot (EUR/USD, trend pullback, Capital.com demo account). See README.md.
+- Spec: started as V1 of an AI-assisted FX/CFD bot (EUR/USD, trend pullback, Capital.com demo account); now runs
+  several experiments (pairs x strategies) on one account. See README.md.
 - Configuration: `.env` holds only bootstrap values (`app/config/store.py` `ENV_ONLY_KEYS`: DATABASE_URL, dashboard and
   config passwords, TRADING_MODE/LIVE_TRADING_CONFIRM). Everything else is stored in `app_config` (global) and
   `experiments.settings` (per experiment), edited on `/config`, and merged + validated by `Settings`. A new setting needs
@@ -26,5 +27,9 @@
   default; never commit credentials.
 - Tests: `pytest -q` (unit) and `TEST_DATABASE_URL=postgresql://... pytest -q` (integration against a disposable DB,
   rebuilt from the migration SQL). Lint: `ruff check app tests`.
-- Bump `PROMPT_VERSION` in `app/decision/prompts.py` whenever the decision prompt or questions change
+- Strategies: `app/strategy/<name>.py` returns a `StrategyResult` (`app/strategy/base.py`); each has a
+  `DecisionPrompt` and an entry in `app/strategy/registry.py`, dispatched by `app.engine.evaluate_strategy`.
+  Strategy-only settings get `strategies=(...)` on their `FieldInfo`. Prompts never name a pair (the snapshot does).
+- Bump a strategy's prompt version in `app/decision/prompts.py` (`PROMPT_VERSION` for trend pullback,
+  `BREAKOUT_PROMPT_VERSION`) whenever its prompt or questions change
   (`NEWS_PROMPT_VERSION` in `app/news/interpreter.py` for the news questions).
