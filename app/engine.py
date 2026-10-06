@@ -895,7 +895,13 @@ async def run_once(base: Settings, shutdown: asyncio.Event) -> None:
         await db.dispose()
         await wait_for_config_change(base, config.version, problem, shutdown)
         return
-    engine = TradingEngine(config.settings, configuration=config, db=db, watch_config=True)
+    try:
+        engine = TradingEngine(config.settings, configuration=config, db=db, watch_config=True)
+    except Exception as exc:  # e.g. two experiments mapping one pair to different markets
+        log.exception("engine could not be built")
+        await db.dispose()
+        await wait_for_config_change(base, config.version, f"configuration problem: {exc}", shutdown)
+        return
     stop = asyncio.Event()
     relay = asyncio.create_task(shutdown.wait())
     relay.add_done_callback(lambda _: stop.set())
