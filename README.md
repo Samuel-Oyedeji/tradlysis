@@ -227,7 +227,8 @@ Open `https://<your-host>/` and sign in with `DASHBOARD_USERNAME` / `DASHBOARD_P
   price and spread.
 - NAV chart for the last 7 days, with a table view.
 - **Controls:** kill switch (stops new orders at once), *close all trades*, reset the
-  daily or drawdown breaker.
+  daily or drawdown breaker. A reset measures from the current account value: the daily loss
+  until the next trading day, the drawdown from now on.
 - Open and closed trades (with R multiples), every 15-minute decision opportunity (tap one
   to see the exact snapshot sent to the model, its raw answer and every risk check), the
   experiment summary, the news calendar (first five items, the rest scroll), central-bank reads
@@ -363,7 +364,7 @@ place orders.
 - Risk settings have hard ceilings: at most 1% per trade, 2% total risk, 5% daily loss
   and 20% drawdown.
 - Global kill switch (dashboard), and daily-loss (auto-resets next trading day at 17:00 New
-  York) and max-drawdown (manual reset) circuit breakers.
+  York, or manually) and max-drawdown (manual reset) circuit breakers.
 - Duplicate protection:
   - one decision per candle
   - one order per approved risk check

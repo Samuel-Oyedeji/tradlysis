@@ -64,6 +64,11 @@ async def test_flatten_and_breaker_reset(client, db):
     async with db.session() as s:
         assert (await get_control(s, ControlKey.FLATTEN_REQUEST))["requested"] is True
     assert (await client.post("/api/controls/reset-breaker/drawdown", auth=AUTH, headers=CSRF)).status_code == 200
+    assert (await client.post("/api/controls/reset-breaker/daily", auth=AUTH, headers=CSRF)).status_code == 200
+    async with db.session() as s:
+        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is False
+        assert (await get_control(s, ControlKey.DAY_START_NAV))["trading_day"] is None
+        assert (await get_control(s, ControlKey.PEAK_NAV))["value"] == "0"
     assert (await client.post("/api/controls/reset-breaker/bogus", auth=AUTH, headers=CSRF)).status_code == 404
 
 

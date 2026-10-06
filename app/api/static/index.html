@@ -346,7 +346,7 @@ $("btn-kill").onclick = () => {
   control("/api/controls/kill-switch", {active, reason}, active ? null : "Resume trading? New trades will be allowed again.");
 };
 $("btn-flatten").onclick = () => control("/api/controls/flatten", {reason: "dashboard"}, "Close ALL open trades at market price? The engine does this within a few seconds.");
-$("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset the daily loss limit and allow trading again today?");
+$("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset the daily loss limit? Today's loss will be measured from the current account value.");
 $("btn-reset-dd").onclick = () => control("/api/controls/reset-breaker/drawdown", {}, "Reset the drawdown limit? Drawdown will be measured from the current account value.");
 document.querySelectorAll("#p-trades .seg button").forEach(b => b.onclick = () => { onlyLlm = b.dataset.llm === "1"; document.querySelectorAll("#p-trades .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
 document.querySelectorAll("#p-info .seg button").forEach(b => b.onclick = () => { minLevel = b.dataset.lvl; document.querySelectorAll("#p-info .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
