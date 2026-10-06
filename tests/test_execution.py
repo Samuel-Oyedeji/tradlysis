@@ -370,3 +370,30 @@ def test_r_multiple():
     assert r_multiple("BUY", 1.1, 1.104, 0.002) == pytest.approx(2.0)
     assert r_multiple("SELL", 1.1, 1.102, 0.002) == pytest.approx(-1.0)
     assert r_multiple("BUY", 1.1, None, 0.002) is None
+
+
+async def test_breaker_resets_do_not_re_trip(db, broker, parts):
+    from app.db.control import reset_breaker
+
+    _, _, reconciler = parts
+    await reconciler.reconcile_once()
+    broker.nav = 94000.0  # -6% on the day and from the peak: both breakers trip
+    await reconciler.reconcile_once()
+    async with db.session() as s:
+        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is True
+        assert (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"] is True
+        await reset_breaker(s, ControlKey.DAILY_LOSS_BREAKER, "admin")
+        await reset_breaker(s, ControlKey.DRAWDOWN_BREAKER, "admin")
+
+    await reconciler.reconcile_once()
+    async with db.session() as s:
+        assert not (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"]
+        assert not (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"]
+        assert (await get_control(s, ControlKey.DAY_START_NAV))["value"] == "94000.0"
+        assert (await get_control(s, ControlKey.PEAK_NAV))["value"] == "94000.0"
+
+    broker.nav = 93000.0  # a further -1.06% from the new base: the daily limit applies again
+    await reconciler.reconcile_once()
+    async with db.session() as s:
+        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is True
+        assert not (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"]

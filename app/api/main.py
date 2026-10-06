@@ -29,6 +29,7 @@ from app.api import history
 from app.config.settings import Settings, get_settings
 from app.db.bootstrap import auto_create_tables
 from app.db.control import get_all_controls, set_control
+from app.db.control import reset_breaker as reset_breaker_control
 from app.db.enums import ControlKey
 from app.db.models import (
     AccountSnapshot,
@@ -592,10 +593,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         if key is None:
             raise HTTPException(404, "unknown breaker")
         async with database.session() as s:
-            await set_control(s, key, {"tripped": False, "reset_by": user, "at": utcnow().isoformat()}, f"api:{user}")
-            if key == ControlKey.DRAWDOWN_BREAKER:
-                # Re-base the drawdown measurement so the breaker does not immediately re-trip.
-                await set_control(s, ControlKey.PEAK_NAV, {"value": "0"}, f"api:{user}")
+            await reset_breaker_control(s, key, user)
             s.add(
                 SystemEvent(
                     level="WARNING", component="api", event_type="BREAKER_RESET",
