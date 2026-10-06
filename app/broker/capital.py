@@ -12,7 +12,10 @@ Design notes:
     unknown; the executor resolves it from the broker's confirmations, positions and activity.
   * The broker is the source of truth; this client does no caching of account state.
   * Capital.com names markets by "epic" (``EURUSD``). The rest of the system uses the
-    instrument name (``EUR_USD``); the client translates in both directions.
+    instrument name (``EUR_USD``); the client translates in both directions. One client (one
+    session, one account) serves every market the experiments trade: markets are registered
+    with :meth:`CapitalClient.register_market`, and market calls take an ``instrument``
+    (default: the first one registered).
 """
 
 from __future__ import annotations
@@ -109,6 +112,8 @@ class CapitalClient:
         self.base_url = base_url.rstrip("/")
         self.instrument = instrument
         self.epic = epic or instrument.replace("_", "")
+        # instrument -> epic, for every market in use; the first one is the default.
+        self.markets: dict[str, str] = {instrument: self.epic}
         # The configured account; after login this is the active account.
         self.account_id = account_id
         self.max_get_retries = max_get_retries
@@ -246,17 +251,38 @@ class CapitalClient:
 
     # ---------------------------------------------------------------- markets
 
+    def register_market(self, instrument: str, epic: str = "") -> str:
+        """Add a market the system trades or watches; returns its epic."""
+        epic = epic or instrument.replace("_", "")
+        existing = self.markets.get(instrument)
+        if existing and existing != epic:
+            raise ValueError(f"{instrument} is already mapped to {existing}, not {epic}")
+        self.markets[instrument] = epic
+        return epic
+
+    def epic_for(self, instrument: str | None = None) -> str:
+        if instrument is None:
+            return self.epic
+        epic = self.markets.get(instrument)
+        if epic is None:
+            raise KeyError(f"market {instrument} is not registered")
+        return epic
+
     def instrument_for_epic(self, epic: str | None) -> str:
-        return self.instrument if epic == self.epic else str(epic or "")
+        for instrument, e in self.markets.items():
+            if e == epic:
+                return instrument
+        return str(epic or "")
 
     async def get_market(self, epic: str | None = None) -> dict[str, Any]:
         return await self._get(f"/markets/{epic or self.epic}")
 
-    async def get_instrument(self) -> InstrumentInfo:
-        return instrument_from_market(self.instrument, await self.get_market())
+    async def get_instrument(self, instrument: str | None = None) -> InstrumentInfo:
+        name = instrument or self.instrument
+        return instrument_from_market(name, await self.get_market(self.epic_for(name)))
 
-    async def get_market_status(self) -> str:
-        return str(((await self.get_market()).get("snapshot") or {}).get("marketStatus", ""))
+    async def get_market_status(self, instrument: str | None = None) -> str:
+        return str(((await self.get_market(self.epic_for(instrument))).get("snapshot") or {}).get("marketStatus", ""))
 
     async def get_mid_price(self, epic: str) -> float | None:
         """Current mid price of any market, or None if it does not exist."""
@@ -279,18 +305,19 @@ class CapitalClient:
         inverse = await self.get_mid_price(f"{account_currency}{currency}")
         return 1.0 / inverse if inverse else None
 
-    async def get_candles(self, granularity: str, count: int = 500) -> list[Bar]:
+    async def get_candles(self, granularity: str, count: int = 500, instrument: str | None = None) -> list[Bar]:
         now = utcnow()
+        epic = self.epic_for(instrument)
         if granularity == "M":
-            days = await self._get_prices("DAY", min(MAX_PRICE_POINTS, (count + 1) * 31 + 5))
+            days = await self._get_prices(epic, "DAY", min(MAX_PRICE_POINTS, (count + 1) * 31 + 5))
             return monthly_bars(parse_price_bars(days, "D", now), now)
         if granularity not in RESOLUTIONS:
             raise ValueError(f"unsupported granularity {granularity}")
-        raw = await self._get_prices(RESOLUTIONS[granularity], min(count, MAX_PRICE_POINTS))
+        raw = await self._get_prices(epic, RESOLUTIONS[granularity], min(count, MAX_PRICE_POINTS))
         return parse_price_bars(raw, granularity, now)
 
-    async def _get_prices(self, resolution: str, max_points: int) -> list[dict[str, Any]]:
-        data = await self._get(f"/prices/{self.epic}", {"resolution": resolution, "max": max_points})
+    async def _get_prices(self, epic: str, resolution: str, max_points: int) -> list[dict[str, Any]]:
+        data = await self._get(f"/prices/{epic}", {"resolution": resolution, "max": max_points})
         return data.get("prices", [])
 
     # ---------------------------------------------------------------- positions
@@ -343,15 +370,28 @@ class CapitalClient:
     # ---------------------------------------------------------------- history
 
     async def get_activity(
-        self, start: datetime, end: datetime | None = None, *, market_only: bool = True
+        self,
+        start: datetime,
+        end: datetime | None = None,
+        *,
+        market_only: bool = True,
+        instrument: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Detailed account activity between start and end (clamped to the API's one-day window)."""
+        """Detailed account activity between start and end (clamped to the API's one-day window).
+
+        ``market_only``: only activity on ``instrument`` if given, else on every registered market
+        (one market is filtered by the API, several are filtered here).
+        """
         end = end or utcnow()
         start = max(start, end - HISTORY_WINDOW)
         params: dict[str, Any] = {"from": api_time(start), "to": api_time(end), "detailed": "true"}
-        if market_only:
-            params["filter"] = f"epic=={self.epic}"
-        return (await self._get("/history/activity", params)).get("activities", [])
+        epics = {self.epic_for(instrument)} if instrument else set(self.markets.values())
+        if market_only and len(epics) == 1:
+            params["filter"] = f"epic=={next(iter(epics))}"
+        activities = (await self._get("/history/activity", params)).get("activities", [])
+        if market_only and len(epics) > 1:
+            activities = [a for a in activities if a.get("epic") in epics]
+        return activities
 
     async def get_transactions(self, start: datetime, end: datetime | None = None) -> list[dict[str, Any]]:
         end = end or utcnow()
@@ -386,14 +426,15 @@ class CapitalClient:
         return json.dumps(msg)
 
     async def stream_quotes(self) -> AsyncIterator[Quote | None]:
-        """Yield live quotes for the configured market until the connection drops.
+        """Yield live quotes for every registered market until the connection drops.
 
         ``None`` is yielded as a heartbeat (subscription confirmed, ping answered).
         """
         await self._ensure_session()
         try:
             async with self._ws_connect(self.stream_url) as ws:
-                await ws.send(self._ws_message("marketData.subscribe", "subscribe", {"epics": [self.epic]}))
+                epics = list(dict.fromkeys(self.markets.values()))
+                await ws.send(self._ws_message("marketData.subscribe", "subscribe", {"epics": epics}))
                 last_ping = last_msg = time.monotonic()
                 seq = 0
                 while True:
@@ -424,8 +465,9 @@ class CapitalClient:
                             yield quote
                     elif destination == "marketData.subscribe":
                         subs = (msg.get("payload") or {}).get("subscriptions") or {}
-                        if subs.get(self.epic) != "PROCESSED":
-                            raise CapitalError(0, msg, f"subscription to {self.epic} failed: {subs}")
+                        failed = [e for e in epics if subs.get(e) != "PROCESSED"]
+                        if failed:
+                            raise CapitalError(0, msg, f"subscription to {', '.join(failed)} failed: {subs}")
                         yield None
                     elif destination == "ping":
                         yield None
@@ -439,11 +481,11 @@ class CapitalClient:
             raise
 
     def _quote(self, p: dict[str, Any]) -> Quote | None:
-        if p.get("epic") != self.epic or p.get("bid") is None or p.get("ofr") is None:
+        if p.get("epic") not in self.markets.values() or p.get("bid") is None or p.get("ofr") is None:
             return None
         ts = p.get("timestamp")
         t = datetime.fromtimestamp(int(ts) / 1000, tz=UTC) if ts else utcnow()
-        return Quote(self.instrument, t, float(p["bid"]), float(p["ofr"]))
+        return Quote(self.instrument_for_epic(p["epic"]), t, float(p["bid"]), float(p["ofr"]))
 
 
 # ---------------------------------------------------------------------- parsing helpers

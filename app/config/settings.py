@@ -1,7 +1,11 @@
 """Application configuration.
 
-All settings come from environment variables (or a local ``.env`` file). Credentials are
-never hard-coded; see ``.env.example`` for the full list.
+Only a few bootstrap values come from environment variables (or a local ``.env`` file):
+``DATABASE_URL``, the dashboard and config-page passwords and the trading mode. Everything
+else is edited on the dashboard's config page and stored in the database (``app_config`` and
+``experiments``); :mod:`app.config.store` merges both into a validated :class:`Settings`, so the
+same safety checks apply to values typed in the browser. Environment values still work as
+fallbacks for settings never saved in-app. Credentials are never hard-coded.
 
 Safety defaults:
   * ``TRADING_MODE`` defaults to ``demo`` and always talks to Capital.com's demo API host.
@@ -150,6 +154,8 @@ class Settings(BaseSettings):
     # --- API / dashboard -----------------------------------------------------------------
     dashboard_username: str = "admin"
     dashboard_password: str = ""
+    # Second password for the config page (credentials, risk limits); the page stays locked until set.
+    config_password: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 

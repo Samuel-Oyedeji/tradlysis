@@ -1,4 +1,9 @@
-"""Market Data Engine: live price stream, price persistence, candle sync and staleness checks."""
+"""Market Data Engine: live price stream, price persistence, candle sync and staleness checks.
+
+One :class:`PriceStream` (one WebSocket for every market) feeds a :class:`MarketState` per
+instrument; each instrument has its own :class:`MarketDataService` for candles, price samples,
+the broker's market status and stale-price alerts.
+"""
 
 from __future__ import annotations
 
@@ -40,58 +45,10 @@ class MarketDataService:
         self.db = db
         self.notifier = notifier
         self.state = state
+        self.instrument = state.instrument
         self._last_persisted: PriceTick | None = None
         self._stale_alerted = False
         self._status_checked_at: datetime | None = None
-
-    # ------------------------------------------------------------------ stream
-
-    async def run_stream(self, stop: asyncio.Event) -> None:
-        backoff = 1.0
-        was_connected_once = False
-        while not stop.is_set():
-            try:
-                async for quote in self.client.stream_quotes():
-                    now = utcnow()
-                    if quote is not None:
-                        self.state.on_tick(PriceTick.from_quote(quote, self.state.broker_tradeable), now)
-                    self.state.on_heartbeat(now)
-                    if not self.state.stream_connected:
-                        self.state.stream_connected = True
-                        self.state.stream_connected_since = now
-                        backoff = 1.0
-                        if was_connected_once:
-                            await self.notifier.info(
-                                COMPONENT, "STREAM_RECONNECTED", "Price stream reconnected",
-                                dedup_key="stream_reconnected",
-                            )
-                        was_connected_once = True
-                    if stop.is_set():
-                        break
-                # Server closed the stream cleanly; treat as a disconnect.
-                if not stop.is_set():
-                    raise CapitalTransportError("price stream closed by server")
-            except asyncio.CancelledError:
-                raise
-            except (CapitalTransportError, CapitalError, ValueError, KeyError) as exc:
-                self.state.stream_connected = False
-                self.state.reconnects += 1
-                level_fn = self.notifier.error if isinstance(exc, CapitalError) else self.notifier.warning
-                await level_fn(
-                    COMPONENT,
-                    "STREAM_DISCONNECTED",
-                    f"Price stream disconnected: {exc}. Reconnecting in {backoff:.0f}s",
-                    details={"reconnects": self.state.reconnects},
-                    # Routine and self-healing: logged only. A real outage alerts as STALE_PRICES.
-                    alert=False,
-                    dedup_key="stream_disconnected",
-                )
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=backoff)
-                except TimeoutError:
-                    pass
-                backoff = min(backoff * 2, 60.0)
-        self.state.stream_connected = False
 
     async def run_price_persister(self, stop: asyncio.Event) -> None:
         interval = self.settings.price_persist_interval_seconds
@@ -123,7 +80,7 @@ class MarketDataService:
     async def refresh_market_status(self) -> None:
         """Poll the broker's market status (TRADEABLE, CLOSED, ...); fails closed on errors."""
         try:
-            status = await self.client.get_market_status()
+            status = await self.client.get_market_status(self.instrument)
         except Exception as exc:
             log.warning("market status fetch failed: %s", exc)
             status = "UNKNOWN"
@@ -153,19 +110,19 @@ class MarketDataService:
                 await self.notifier.warning(
                     COMPONENT,
                     "STALE_PRICES",
-                    "No fresh prices during market hours",
+                    f"No fresh {self.instrument} prices during market hours",
                     details=self.state.status(now),
                     alert=True,
-                    dedup_key="stale_prices",
+                    dedup_key=f"stale_prices_{self.instrument}",
                 )
             elif not stale and self._stale_alerted:
                 self._stale_alerted = False
-                await self.notifier.info(COMPONENT, "PRICES_RECOVERED", "Fresh prices are flowing again", alert=True)
+                await self.notifier.info(COMPONENT, "PRICES_RECOVERED", f"Fresh {self.instrument} prices are flowing again", alert=True)
 
     # ------------------------------------------------------------------ candles
 
     async def sync_candles(self, granularity: str, count: int) -> int:
-        bars = await self.client.get_candles(granularity, count=count)
+        bars = await self.client.get_candles(granularity, count=count, instrument=self.instrument)
         await self.upsert_bars(granularity, bars)
         return len(bars)
 
@@ -174,7 +131,7 @@ class MarketDataService:
             return
         rows = [
             {
-                "instrument": self.settings.instrument,
+                "instrument": self.instrument,
                 "granularity": granularity,
                 "time": b.time,
                 "open": b.open,
@@ -211,12 +168,12 @@ class MarketDataService:
     async def backfill(self) -> None:
         for g in SYNC_GRANULARITIES:
             n = await self.sync_candles(g, self.settings.candle_history_count)
-            log.info("Backfilled %d %s candles", n, g)
+            log.info("Backfilled %d %s %s candles", n, self.instrument, g)
 
     async def load_bars(self, granularity: str, limit: int = 500, *, before: datetime | None = None) -> list[Bar]:
         """Most recent complete candles in ascending time order."""
         q = select(Candle).where(
-            Candle.instrument == self.settings.instrument,
+            Candle.instrument == self.instrument,
             Candle.granularity == granularity,
             Candle.complete.is_(True),
         )
@@ -239,3 +196,71 @@ class MarketDataService:
             )
             for r in reversed(rows)
         ]
+
+
+class PriceStream:
+    """The broker's price stream for every market, fanned out to one MarketState per instrument."""
+
+    def __init__(self, client: CapitalClient, notifier: Notifier, states: dict[str, MarketState]) -> None:
+        self.client = client
+        self.notifier = notifier
+        self.states = states
+        self.connected = False
+        self.reconnects = 0
+
+    def _set_connected(self, connected: bool, now: datetime | None = None) -> None:
+        self.connected = connected
+        for state in self.states.values():
+            state.stream_connected = connected
+            state.reconnects = self.reconnects
+            if connected:
+                state.stream_connected_since = now
+
+    async def run_stream(self, stop: asyncio.Event) -> None:
+        backoff = 1.0
+        was_connected_once = False
+        while not stop.is_set():
+            try:
+                async for quote in self.client.stream_quotes():
+                    now = utcnow()
+                    if quote is not None:
+                        state = self.states.get(quote.instrument)
+                        if state is not None:
+                            state.on_tick(PriceTick.from_quote(quote, state.broker_tradeable), now)
+                    for state in self.states.values():
+                        state.on_heartbeat(now)
+                    if not self.connected:
+                        self._set_connected(True, now)
+                        backoff = 1.0
+                        if was_connected_once:
+                            await self.notifier.info(
+                                COMPONENT, "STREAM_RECONNECTED", "Price stream reconnected",
+                                dedup_key="stream_reconnected",
+                            )
+                        was_connected_once = True
+                    if stop.is_set():
+                        break
+                # Server closed the stream cleanly; treat as a disconnect.
+                if not stop.is_set():
+                    raise CapitalTransportError("price stream closed by server")
+            except asyncio.CancelledError:
+                raise
+            except (CapitalTransportError, CapitalError, ValueError, KeyError) as exc:
+                self.reconnects += 1
+                self._set_connected(False)
+                level_fn = self.notifier.error if isinstance(exc, CapitalError) else self.notifier.warning
+                await level_fn(
+                    COMPONENT,
+                    "STREAM_DISCONNECTED",
+                    f"Price stream disconnected: {exc}. Reconnecting in {backoff:.0f}s",
+                    details={"reconnects": self.reconnects},
+                    # Routine and self-healing: logged only. A real outage alerts as STALE_PRICES.
+                    alert=False,
+                    dedup_key="stream_disconnected",
+                )
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=backoff)
+                except TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 60.0)
+        self._set_connected(False)

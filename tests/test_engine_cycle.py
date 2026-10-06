@@ -102,7 +102,7 @@ async def test_no_setup_is_logged_as_prefilter_wait_and_deduplicated(db):
     seed_candles(broker, candle_time)
     calls = []
     engine = await make_engine(db, broker, llm_client(BUY, calls))
-    summary = await engine.run_cycle(candle_time)
+    summary = (await engine.run_cycle(candle_time))[engine.primary.slug]
     assert summary.request_id is not None, summary
     assert summary.decision == "WAIT" and not summary.llm_called
     assert calls == [], "no LLM call without a deterministic candidate"
@@ -116,7 +116,7 @@ async def test_no_setup_is_logged_as_prefilter_wait_and_deduplicated(db):
     assert dec.source == "PREFILTER" and dec.reason_codes
     assert await count(db, TechnicalSnapshot) == 3
     # Same candle again (e.g. after a restart): not processed twice.
-    again = await engine.run_cycle(candle_time)
+    again = (await engine.run_cycle(candle_time))[engine.primary.slug]
     assert again.note == "cycle already processed"
     assert await count(db, DecisionRequest) == 1
     assert await _setup_events(db) == [], "no setup, nothing for Telegram"
@@ -131,7 +131,7 @@ async def test_candidate_confirmed_approved_and_executed(db, monkeypatch):
     monkeypatch.setattr("app.engine.evaluate_trend_pullback", lambda tech, bid, ask, s: real(long_state(), bid, ask, s))
     calls = []
     engine = await make_engine(db, broker, llm_client(BUY, calls))
-    summary = await engine.run_cycle(candle_time)
+    summary = (await engine.run_cycle(candle_time))[engine.primary.slug]
     assert summary.candidate and summary.llm_called and summary.decision == "BUY", summary
     assert summary.approved, summary.rejections
     assert summary.order_status == "FILLED"
@@ -166,7 +166,7 @@ async def test_news_blackout_blocks_before_llm(db, monkeypatch):
     nfp = CalendarEvent("fake", "nfp", "Non-Farm Payrolls", "USD", "HIGH", utcnow() + timedelta(minutes=10))
     calls = []
     engine = await make_engine(db, broker, llm_client(BUY, calls), calendar=FakeCalendar([nfp]))
-    summary = await engine.run_cycle(candle_time)
+    summary = (await engine.run_cycle(candle_time))[engine.primary.slug]
     assert summary.candidate and summary.decision == "WAIT" and not calls
     async with db.session() as s:
         dec = await s.scalar(select(Decision))
@@ -181,7 +181,7 @@ async def test_llm_buy_without_plan_is_rejected_by_risk(db):
     seed_candles(broker, candle_time)
     calls = []
     engine = await make_engine(db, broker, llm_client(BUY, calls), llm_call_policy="always")
-    summary = await engine.run_cycle(candle_time)
+    summary = (await engine.run_cycle(candle_time))[engine.primary.slug]
     assert summary.llm_called and summary.decision == "BUY"
     assert summary.approved is False and "TRADE_PLAN_MATCHES" in summary.rejections
     assert not broker.order_posts
@@ -192,3 +192,82 @@ async def _setup_events(db) -> list[str]:
     async with db.session() as s:
         rows = (await s.scalars(select(SystemEvent).where(SystemEvent.event_type == "SETUP"))).all()
     return [" ".join(r.message.split("\n")[0].split(" ")[:2]) for r in rows]
+
+
+async def make_multi_engine(db, broker, llm, experiments: dict[str, dict]) -> TradingEngine:
+    """An engine running several experiments (slug -> experiment settings overrides) on one account."""
+    from app.config.store import Configuration, ExperimentConfig, experiment_settings
+
+    base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
+    config = Configuration(settings=base, experiments=[
+        ExperimentConfig(id=i, slug=slug, name=slug.upper(), description=None, instrument="EUR_USD",
+                         strategy="trend_pullback", enabled=True, capital=None, overrides=over,
+                         settings=experiment_settings(base, slug, "EUR_USD", over))
+        for i, (slug, over) in enumerate(experiments.items())
+    ])
+    engine = TradingEngine(base, configuration=config, db=db, client=make_client(broker), llm=llm,
+                           calendar=FakeCalendar(), feeds=[], telegram=TelegramSender("", ""))
+    await engine.setup()
+    await engine.reconciler.reconcile_once()
+    await engine.market.backfill()
+    await engine.news.poll_calendar()
+    engine.news.last_calendar_success = utcnow()
+    engine.state.stream_connected = True
+    engine.state.on_tick(PriceTick("EUR_USD", utcnow(), broker.bid, broker.ask), utcnow())
+    return engine
+
+
+@pytest.mark.parametrize("hedging", [False, True])
+async def test_two_experiments_share_the_account(db, monkeypatch, hedging):
+    broker = FakeBroker(hedging_mode=hedging)
+    candle_time = floor_time(utcnow(), "M15") - timedelta(minutes=15)
+    seed_candles(broker, candle_time)
+    real = trend_pullback.evaluate_trend_pullback
+    monkeypatch.setattr("app.engine.evaluate_trend_pullback", lambda tech, bid, ask, s: real(long_state(), bid, ask, s))
+    calls = []
+    engine = await make_multi_engine(db, broker, llm_client(BUY, calls), {
+        "pullback-a": {},
+        "pullback-b": {"risk_per_trade_pct": "0.5", "max_total_risk_pct": "1.0", "openrouter_model": "typesafe/jev-1.13"},
+    })
+    summaries = await engine.run_cycle(candle_time)
+    assert set(summaries) == {"pullback-a", "pullback-b"}
+    assert all(s.decision == "BUY" for s in summaries.values()), summaries
+    async with db.session() as s:
+        reqs = (await s.scalars(select(DecisionRequest).order_by(DecisionRequest.experiment))).all()
+        trades = (await s.scalars(select(Trade).order_by(Trade.experiment))).all()
+        checks = (await s.scalars(select(RiskCheck))).all()
+    assert [r.experiment for r in reqs] == ["pullback-a", "pullback-b"]
+    assert len(checks) == 2
+    # Each experiment sizes on its own equity and risk setting (0.25% vs 0.5% of 100,000).
+    sized = sorted(c.risk_pct for c in checks if c.units)
+    assert sized[0] == pytest.approx(0.25, abs=0.01) and sized[-1] == pytest.approx(0.5, abs=0.02)
+    if hedging:
+        # Positions are kept apart: both experiments trade, each trade is attributed.
+        assert len(broker.order_posts) == 2
+        assert [t.experiment for t in trades] == ["pullback-a", "pullback-b"]
+    else:
+        # A netting account: the second order would reduce the first, so only one fills.
+        assert len(broker.order_posts) == 1 and len(trades) == 1
+        loser = next(s for s in summaries.values() if s.order_status != "FILLED")
+        assert loser.order_status == "FAILED" or "EXISTING_POSITION" in (loser.rejections or [])
+    status = engine.status()
+    assert set(status["experiments"]) == {"pullback-a", "pullback-b"}
+    assert status["experiments"]["pullback-b"]["risk_limits"]["risk_per_trade_pct"] == 0.5
+    assert status["markets"]["EUR_USD"]["stream_connected"]
+
+
+async def test_kill_switch_of_one_experiment_leaves_the_other_trading(db, monkeypatch):
+    from app.db.control import scoped, set_control
+    from app.db.enums import ControlKey
+
+    broker = FakeBroker(hedging_mode=True)
+    candle_time = floor_time(utcnow(), "M15") - timedelta(minutes=15)
+    seed_candles(broker, candle_time)
+    real = trend_pullback.evaluate_trend_pullback
+    monkeypatch.setattr("app.engine.evaluate_trend_pullback", lambda tech, bid, ask, s: real(long_state(), bid, ask, s))
+    engine = await make_multi_engine(db, broker, llm_client(BUY, []), {"pullback-a": {}, "pullback-b": {}})
+    async with db.session() as s:
+        await set_control(s, scoped(ControlKey.KILL_SWITCH, "pullback-a"), {"active": True, "reason": "test"}, "t")
+    summaries = await engine.run_cycle(candle_time)
+    assert "KILL_SWITCH" in summaries["pullback-a"].rejections
+    assert summaries["pullback-b"].order_status == "FILLED"

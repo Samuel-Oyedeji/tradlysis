@@ -10,11 +10,11 @@ from sqlalchemy.exc import IntegrityError
 
 from app.alerts.notifier import Notifier
 from app.broker.types import InstrumentInfo
-from app.db.control import get_control, set_control
+from app.db.control import get_control, scoped, set_control
 from app.db.enums import ControlKey
 from app.db.models import BrokerTransaction, Decision, DecisionRequest, Order, RiskCheck, SystemEvent, Trade
 from app.execution.executor import OrderExecutor
-from app.reconciliation.reconciler import Reconciler, r_multiple
+from app.reconciliation.reconciler import ExperimentBook, Reconciler, r_multiple
 from app.risk.engine import CheckResult, RiskResult
 from tests.conftest import make_settings
 from tests.fake_broker import FakeBroker, make_client
@@ -54,12 +54,12 @@ def approved(direction="BUY") -> RiskResult:
     )
 
 
-async def chain(db, candle_offset=0) -> tuple[int, int]:
+async def chain(db, candle_offset=0, experiment="test") -> tuple[int, int]:
     """Insert request -> decision -> risk_check rows; returns (request_id, risk_check_id)."""
     from datetime import timedelta
 
     async with db.session() as s:
-        req = DecisionRequest(experiment="test", instrument="EUR_USD", candle_time=T0 + timedelta(minutes=15 * candle_offset),
+        req = DecisionRequest(experiment=experiment, instrument="EUR_USD", candle_time=T0 + timedelta(minutes=15 * candle_offset),
                               snapshot={}, strategy_result={})
         s.add(req)
         await s.flush()
@@ -297,22 +297,72 @@ async def test_unexpected_position_flagged(db, broker, parts):
     assert ev.level == "CRITICAL"
 
 
-async def test_account_view_and_breakers(db, broker, parts):
+SLUG = "v1-trend-pullback-eur-usd"  # make_settings()' experiment
+
+
+async def closed_trade(db, pl: float, experiment: str = SLUG) -> None:
+    """A closed trade of an experiment with the given realized P/L (moves its equity)."""
+    async with db.session() as s:
+        n = await s.scalar(select(func.count()).select_from(Trade))
+        s.add(Trade(broker_trade_id=f"closed-{experiment}-{n}", experiment=experiment, instrument="EUR_USD",
+                    direction="BUY", initial_units=1000, current_units=0, open_price=1.1, open_time=T0,
+                    state="CLOSED", realized_pl=Decimal(str(pl)), raw={}))
+
+
+def ctl(key: ControlKey, experiment: str = SLUG) -> str:
+    return scoped(key, experiment)
+
+
+async def test_experiment_equity_and_breakers(db, broker, parts):
     settings, _, reconciler = parts
     await reconciler.reconcile_once()
     assert reconciler.account.nav == Decimal("100000.0") and reconciler.account.currency == "USD"
+    eq = reconciler.equity[SLUG]
+    assert eq.capital == Decimal("100000.0") and eq.equity == Decimal("100000.0")
     async with db.session() as s:
-        assert (await get_control(s, ControlKey.PEAK_NAV))["value"] == str(reconciler.account.nav)
-        assert (await get_control(s, ControlKey.DAY_START_NAV))["value"] == str(reconciler.account.nav)
-    broker.nav = 98500.0  # -1.5% on the day, limit is 1%
+        assert (await get_control(s, ctl(ControlKey.PEAK_NAV)))["value"] == "100000.0"
+        assert (await get_control(s, ctl(ControlKey.DAY_START_NAV)))["value"] == "100000.0"
+    # The account's NAV alone no longer matters: only the experiment's own P/L does.
+    broker.nav = 90000.0
     await reconciler.reconcile_once()
     async with db.session() as s:
-        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is True
-        assert not (await get_control(s, ControlKey.DRAWDOWN_BREAKER) or {}).get("tripped")
-    broker.nav = 94000.0  # -6% from peak, limit is 5%
+        assert not (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)) or {}).get("tripped")
+    await closed_trade(db, -1500)  # -1.5% of the experiment's equity on the day, limit is 1%
+    await reconciler.reconcile_once()
+    assert reconciler.equity[SLUG].equity == Decimal("98500.0")
+    async with db.session() as s:
+        assert (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)))["tripped"] is True
+        assert not (await get_control(s, ctl(ControlKey.DRAWDOWN_BREAKER)) or {}).get("tripped")
+    await closed_trade(db, -4500)  # -6% from peak, limit is 5%
     await reconciler.reconcile_once()
     async with db.session() as s:
-        assert (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"] is True
+        assert (await get_control(s, ctl(ControlKey.DRAWDOWN_BREAKER)))["tripped"] is True
+
+
+async def test_breakers_are_per_experiment(db, broker, parts):
+    settings, executor, _ = parts
+    other = settings.model_copy(update={"experiment_name": "other", "max_daily_loss_pct": 2.0})
+    saved = {}
+
+    async def on_capital(slug, capital):
+        saved[slug] = capital
+
+    books = {
+        SLUG: ExperimentBook(SLUG, settings),
+        "other": ExperimentBook("other", other, capital=Decimal("10000")),
+    }
+    reconciler = Reconciler(settings, executor.client, db, Notifier(db, None), executor, books, on_capital)
+    await reconciler.reconcile_once()
+    assert saved == {SLUG: Decimal("100000.0")}, "only an experiment without capital takes the account balance"
+    await closed_trade(db, -150, "other")  # -1.5% of the other experiment's 10,000: below its 2% limit
+    await closed_trade(db, -1200)  # -1.2% of the first: above its 1% limit
+    await reconciler.reconcile_once()
+    assert reconciler.equity["other"].equity == Decimal("9850")
+    async with db.session() as s:
+        assert (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)))["tripped"] is True
+        assert not (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER, "other")) or {}).get("tripped")
+    [ev] = await events(db, "DAILY_LOSS_BREAKER")
+    assert ev.details["experiment"] == SLUG
 
 
 async def test_bad_account_readings_never_trip_breakers(db, broker, parts):
@@ -320,6 +370,7 @@ async def test_bad_account_readings_never_trip_breakers(db, broker, parts):
     assert await reconciler.reconcile_once()
     good = reconciler.account
     assert good.nav == Decimal("100000.0")
+    await closed_trade(db, -6000)
 
     broker.nav = 0.0  # Capital.com hiccup: equity reported as 0
     assert await reconciler.reconcile_once()
@@ -329,22 +380,20 @@ async def test_bad_account_readings_never_trip_breakers(db, broker, parts):
 
     assert reconciler.account is good, "the last valid reading is kept"
     async with db.session() as s:
-        assert not (await get_control(s, ControlKey.DAILY_LOSS_BREAKER) or {}).get("tripped")
-        assert not (await get_control(s, ControlKey.DRAWDOWN_BREAKER) or {}).get("tripped")
-        assert (await get_control(s, ControlKey.PEAK_NAV))["value"] == "100000.0"
-        assert (await get_control(s, ControlKey.DAY_START_NAV))["value"] == "100000.0"
+        assert not (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)) or {}).get("tripped")
+        assert not (await get_control(s, ctl(ControlKey.DRAWDOWN_BREAKER)) or {}).get("tripped")
+        assert (await get_control(s, ctl(ControlKey.PEAK_NAV)))["value"] == "100000.0"
+        assert (await get_control(s, ctl(ControlKey.DAY_START_NAV)))["value"] == "100000.0"
     [ev] = await events(db, "ACCOUNT_READING_IGNORED")  # one warning per run of bad readings, not a critical
     assert ev.level == "WARNING"
     assert not await events(db, "DRAWDOWN_BREAKER") and not await events(db, "DAILY_LOSS_BREAKER")
 
     # Valid readings resume normal behaviour, including real breaker trips.
     broker.account_without_balance = False
-    broker.nav = 98500.0
     assert await reconciler.reconcile_once()
-    assert reconciler.account.nav == Decimal("98500.0")
     assert len(await events(db, "ACCOUNT_READING_RECOVERED")) == 1
     async with db.session() as s:
-        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is True
+        assert (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)))["tripped"] is True
 
 
 async def test_session_expiry_relogs_in(db, broker, parts):
@@ -377,23 +426,56 @@ async def test_breaker_resets_do_not_re_trip(db, broker, parts):
 
     _, _, reconciler = parts
     await reconciler.reconcile_once()
-    broker.nav = 94000.0  # -6% on the day and from the peak: both breakers trip
+    await closed_trade(db, -6000)  # -6% on the day and from the peak: both breakers trip
     await reconciler.reconcile_once()
     async with db.session() as s:
-        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is True
-        assert (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"] is True
-        await reset_breaker(s, ControlKey.DAILY_LOSS_BREAKER, "admin")
-        await reset_breaker(s, ControlKey.DRAWDOWN_BREAKER, "admin")
+        assert (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)))["tripped"] is True
+        assert (await get_control(s, ctl(ControlKey.DRAWDOWN_BREAKER)))["tripped"] is True
+        await reset_breaker(s, ControlKey.DAILY_LOSS_BREAKER, "admin", SLUG)
+        await reset_breaker(s, ControlKey.DRAWDOWN_BREAKER, "admin", SLUG)
 
     await reconciler.reconcile_once()
     async with db.session() as s:
-        assert not (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"]
-        assert not (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"]
-        assert (await get_control(s, ControlKey.DAY_START_NAV))["value"] == "94000.0"
-        assert (await get_control(s, ControlKey.PEAK_NAV))["value"] == "94000.0"
+        assert not (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)))["tripped"]
+        assert not (await get_control(s, ctl(ControlKey.DRAWDOWN_BREAKER)))["tripped"]
+        assert Decimal((await get_control(s, ctl(ControlKey.DAY_START_NAV)))["value"]) == Decimal("94000")
+        assert Decimal((await get_control(s, ctl(ControlKey.PEAK_NAV)))["value"]) == Decimal("94000")
 
-    broker.nav = 93000.0  # a further -1.06% from the new base: the daily limit applies again
+    await closed_trade(db, -1000)  # a further -1.06% from the new base: the daily limit applies again
     await reconciler.reconcile_once()
     async with db.session() as s:
-        assert (await get_control(s, ControlKey.DAILY_LOSS_BREAKER))["tripped"] is True
-        assert not (await get_control(s, ControlKey.DRAWDOWN_BREAKER))["tripped"]
+        assert (await get_control(s, ctl(ControlKey.DAILY_LOSS_BREAKER)))["tripped"] is True
+        assert not (await get_control(s, ctl(ControlKey.DRAWDOWN_BREAKER)))["tripped"]
+
+
+async def test_flatten_one_experiment_only(db, broker, parts):
+    settings, executor, reconciler = parts
+    broker.hedging_mode = True
+    _, rc_a = await chain(db, 0)
+    await executor.execute_trade(rc_a, 1, approved(), settings.model_copy(update={"experiment_name": "test"}))
+    external = broker.add_external_position(units=1000, price=1.1, sl=1.09)
+    [mine] = [d for d in broker.positions if d != external]
+    await reconciler.reconcile_once()
+    owners = await executor.position_owners([mine, external])
+    assert owners == {mine: "test", external: None}
+    closed = await executor.flatten_all("test only", "test")
+    assert closed == 1 and list(broker.positions) == [external]
+
+
+async def test_hedging_lets_experiments_share_an_instrument(db, broker, parts):
+    settings, executor, reconciler = parts
+    exp = settings.model_copy(update={"experiment_name": "test"})
+    _, rc1 = await chain(db, 0)
+    assert (await executor.execute_trade(rc1, 1, approved(), exp)).status == "FILLED"
+    await reconciler.reconcile_once()
+    other = settings.model_copy(update={"experiment_name": "other"})
+    _, rc2 = await chain(db, 1, "other")
+    blocked = await executor.execute_trade(rc2, 2, approved(), other)
+    assert blocked.status == "FAILED" and blocked.reject_reason.startswith("OPEN_ONLY"), "netting account"
+    broker.hedging_mode = True
+    _, rc3 = await chain(db, 2, "other")
+    assert (await executor.execute_trade(rc3, 3, approved(), other)).status == "FILLED"
+    assert sorted((await executor.position_owners(list(broker.positions))).values()) == ["other", "test"]
+    _, rc4 = await chain(db, 3)
+    again = await executor.execute_trade(rc4, 4, approved(), exp)
+    assert again.status == "FAILED", "still one position per experiment and instrument"
