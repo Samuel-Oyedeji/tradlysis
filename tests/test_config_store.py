@@ -128,3 +128,19 @@ def test_strategy_settings_are_tagged():
     assert store.FIELD_BY_KEY["breakout_range_bars"].strategies == ("range_breakout",)
     assert store.FIELD_BY_KEY["strategy_pullback_lookback_bars"].strategies == ("trend_pullback",)
     assert store.FIELD_BY_KEY["min_risk_reward"].strategies == ()
+
+
+async def test_changing_capital_rebases_the_breaker_marks(db):
+    base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
+    await store.save_experiment(db, base, "eur", ExperimentInput(name="EUR", instrument="EUR_USD", capital="100000"),
+                                "a", create=True)
+    async with db.session() as s:
+        await set_control(s, scoped(ControlKey.PEAK_NAV, "eur"), {"value": "100000"}, "reconciliation")
+        await set_control(s, scoped(ControlKey.DAY_START_NAV, "eur"), {"trading_day": "2026-10-06", "value": "100000"}, "r")
+    await store.save_experiment(db, base, "eur", ExperimentInput(name="EUR 2"), "a")
+    async with db.session() as s:
+        assert (await get_control(s, scoped(ControlKey.PEAK_NAV, "eur")))["value"] == "100000", "only capital re-bases"
+    await store.save_experiment(db, base, "eur", ExperimentInput(capital="500"), "a")
+    async with db.session() as s:
+        assert (await get_control(s, scoped(ControlKey.PEAK_NAV, "eur")))["value"] == "0"
+        assert (await get_control(s, scoped(ControlKey.DAY_START_NAV, "eur")))["trading_day"] is None

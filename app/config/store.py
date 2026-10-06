@@ -538,6 +538,14 @@ async def save_experiment(
         row.settings = after["settings"]
         if create:
             s.add(row)
+        elif before["capital"] != after["capital"]:
+            # New capital = new equity level: re-base the peak and start-of-day marks (as a breaker reset
+            # does), or the drawdown/daily breakers would compare it with marks taken at the old capital.
+            from app.market_data.timeutil import utcnow
+
+            mark = {"reason": "capital changed", "at": utcnow().isoformat()}
+            await set_control(s, scoped(ControlKey.PEAK_NAV, slug), {"value": "0", **mark}, user)
+            await set_control(s, scoped(ControlKey.DAY_START_NAV, slug), {"trading_day": None, **mark}, user)
         for k, old, new in changed:
             s.add(ConfigChange(scope=slug, key=k, old_value=None if old is None else str(old),
                                new_value=None if new is None else str(new), changed_by=user))
