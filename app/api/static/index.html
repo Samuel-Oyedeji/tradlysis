@@ -76,10 +76,10 @@ svg#nav-chart { height: 260px; }
       <div class="banner" id="banner" role="alert"></div>
 
       <section class="tiles" aria-label="Key figures">
-        <div class="panel tile"><div class="label">Account value (NAV)</div><div class="value" id="t-nav">–</div><div class="foot" id="t-nav-foot"></div></div>
+        <div class="panel tile"><div class="label" title="The experiment's capital plus the P/L of its own trades">Experiment equity</div><div class="value" id="t-nav">–</div><div class="foot" id="t-nav-foot"></div></div>
         <div class="panel tile"><div class="label">Today</div><div class="value" id="t-day">–</div><div class="foot">since 17:00 New York</div></div>
         <div class="panel tile"><div class="label">Open trades</div><div class="value" id="t-open">–</div><div class="foot" id="t-open-foot"></div></div>
-        <div class="panel tile"><div class="label" id="t-price-label">EUR/USD</div><div class="value" id="t-price">–</div><div class="foot" id="t-price-foot"></div></div>
+        <div class="panel tile"><div class="label" id="t-price-label">Price</div><div class="value" id="t-price">–</div><div class="foot" id="t-price-foot"></div></div>
       </section>
 
       <section class="panel" style="margin-top:16px" aria-labelledby="h-last">
@@ -90,9 +90,9 @@ svg#nav-chart { height: 260px; }
       <div class="ov">
         <div class="stack">
           <section class="panel" id="p-chart">
-            <div class="panel-h"><h2>Account value · last 7 days</h2><button class="linkbtn" id="toggle-table" type="button">Show table</button></div>
+            <div class="panel-h"><h2 id="chart-title">Experiment equity · last 7 days</h2><button class="linkbtn" id="toggle-table" type="button">Show table</button></div>
             <div class="panel-b">
-              <div class="chart-wrap" id="chart-wrap"><svg class="chart" id="nav-chart" role="img" aria-label="Account value over the last 7 days"></svg><div class="tooltip" id="tooltip"></div></div>
+              <div class="chart-wrap" id="chart-wrap"><svg class="chart" id="nav-chart" role="img" aria-label="Experiment equity over the last 7 days"></svg><div class="tooltip" id="tooltip"></div></div>
               <div class="scroll-x" id="chart-table" style="display:none"></div>
             </div>
           </section>
@@ -117,21 +117,27 @@ svg#nav-chart { height: 260px; }
             <div class="panel-h"><h2>Controls</h2></div>
             <div class="panel-b">
               <div class="ctl">
-                <button id="btn-kill" class="btn danger block" type="button">Stop trading (kill switch)</button>
-                <button id="btn-flatten" class="btn block" type="button">Close all open trades</button>
+                <button id="btn-kill" class="btn danger block" type="button">Stop this experiment (kill switch)</button>
+                <button id="btn-flatten" class="btn block" type="button">Close this experiment's trades</button>
                 <div class="row2">
                   <button id="btn-reset-daily" class="btn" type="button">Reset daily limit</button>
                   <button id="btn-reset-dd" class="btn" type="button">Reset drawdown</button>
                 </div>
               </div>
               <div class="breakers" id="breakers"></div>
+              <details style="margin-top:12px"><summary>All experiments</summary>
+                <div class="ctl" style="margin-top:8px">
+                  <button id="btn-kill-all" class="btn block" type="button">Stop all experiments</button>
+                  <button id="btn-flatten-all" class="btn block" type="button">Close every trade on the account</button>
+                </div>
+              </details>
             </div>
           </section>
           <section class="panel tabbed" id="p-info">
             <div class="panel-h">
               <div class="ptabs" role="tablist" aria-label="Experiments, news and system events">
                 <button type="button" role="tab" id="tab-analysis" aria-controls="analysis-tab" aria-selected="true">Experiment results</button>
-                <button type="button" role="tab" id="tab-news" aria-controls="news" aria-selected="false" tabindex="-1">News · EUR &amp; USD</button>
+                <button type="button" role="tab" id="tab-news" aria-controls="news" aria-selected="false" tabindex="-1" id-news-label>News</button>
                 <button type="button" role="tab" id="tab-events" aria-controls="events" aria-selected="false" tabindex="-1">System events</button>
               </div>
               <span class="aside" id="summary-when" data-for="analysis-tab"></span>
@@ -179,7 +185,7 @@ async function refresh() {
     api("/api/news"), api("/api/analysis/latest"),
   ].map(p => p.catch(e => ({__error: e.message}))));
   if (!status) { showBanner(["Could not reach the API. Check that the api service is running."]); return; }
-  renderStatus(status, account); accountSeries = account.series || []; renderChart();
+  renderStatus(status, account); accountSeries = equitySeries(status, account); renderChart();
   renderOpen(open); renderClosed(closed); renderDecisions(decisions); renderEvents(events); renderNews(news);
   renderAnalysis(analysis.report); renderPipe(status);
   $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -189,27 +195,44 @@ function showBanner(lines) { $("banner").style.display = lines.length ? "block" 
 
 function renderStatus(s, account) {
   const c = s.controls || {}, kill = c.kill_switch || {}, daily = c.daily_loss_breaker || {}, dd = c.drawdown_breaker || {};
+  const globalKill = (c.global_kill_switch || {}).active, ownKill = (c.experiment_kill_switch || {}).active;
+  const info = s.experiment_info || {};
   const lines = [];
   if (!s.engine_alive) lines.push("The trading engine hasn't reported for over a minute. Check the engine service.");
-  if (kill.active) lines.push(`Trading is stopped by the kill switch${kill.reason ? ` (${kill.reason})` : ""}.`);
+  else if (s.engine_state === "WAITING") lines.push(`The engine is not trading: ${s.engine_reason || "waiting for configuration"}.`);
+  else if (!s.running) lines.push(info.enabled ? "This experiment starts when the engine has picked up the latest configuration." : "This experiment is switched off. Enable it on the Config page.");
+  if (globalKill) lines.push(`All experiments are stopped by the kill switch${kill.reason ? ` (${kill.reason})` : ""}.`);
+  else if (kill.active) lines.push(`This experiment is stopped by its kill switch${kill.reason ? ` (${kill.reason})` : ""}.`);
   if (daily.tripped) lines.push("Daily loss limit reached: no new trades until the next trading day.");
   if (dd.tripped) lines.push("Maximum drawdown reached: no new trades until you reset the drawdown limit.");
   showBanner(lines);
-  $("btn-kill").textContent = kill.active ? "Resume trading" : "Stop trading (kill switch)";
-  $("btn-kill").className = kill.active ? "btn primary block" : "btn danger block";
+  $("btn-kill").textContent = ownKill ? "Resume this experiment" : "Stop this experiment (kill switch)";
+  $("btn-kill").className = ownKill ? "btn primary block" : "btn danger block";
+  $("btn-kill-all").textContent = globalKill ? "Resume all experiments" : "Stop all experiments";
+  $("btn-kill-all").className = globalKill ? "btn primary block" : "btn block";
+  const [base, quote] = String(info.instrument || "EUR_USD").split("_");
+  document.querySelector("[id-news-label]").textContent = `News · ${base} & ${quote}`;
   const row = (label, bad, text) => `<div><span class="dim">${label}</span><span><span class="dot ${bad ? "d-bad" : "d-good"}"></span> ${text}</span></div>`;
-  $("breakers").innerHTML = row("Kill switch", kill.active, kill.active ? "On" : "Off") + row("Daily loss limit", daily.tripped, daily.tripped ? "Reached" : "OK") + row("Drawdown limit", dd.tripped, dd.tripped ? "Reached" : "OK");
+  $("breakers").innerHTML = row("Kill switch", kill.active, globalKill ? "On (all)" : kill.active ? "On" : "Off") + row("Daily loss limit", daily.tripped, daily.tripped ? "Reached" : "OK") + row("Drawdown limit", dd.tripped, dd.tripped ? "Reached" : "OK");
 
+  // The experiment's own equity (capital + P/L of its trades): live from the engine, else from the trades.
   const eng = s.engine || {}, acct = eng.account || (account && account.latest);
-  if (acct) {
-    $("t-nav").textContent = fmt(Number(acct.nav)); $("t-nav-foot").textContent = `${acct.currency} · balance ${fmt(Number(acct.balance))}`;
+  const live = (s.experiment_status || {}).equity, stored = account && account.experiment;
+  const eq = live ? {equity: Number(live.equity), balance: Number(live.balance), upl: Number(live.unrealized_pl), open: live.open_trades}
+    : stored ? {equity: stored.equity, balance: stored.balance, upl: stored.unrealized_pl, open: null} : null;
+  const ccy = acct ? acct.currency : "";
+  if (eq) {
+    $("t-nav").textContent = fmt(eq.equity);
+    $("t-nav-foot").textContent = `${ccy} · balance ${fmt(eq.balance)}${acct ? ` · account ${fmt(Number(acct.nav))}` : ""}`;
     const dayStart = c.day_start_nav ? Number(c.day_start_nav.value) : null;
-    $("t-day").innerHTML = dayStart ? signed((Number(acct.nav) - dayStart) / dayStart * 100, 2, "%") : "–";
-    $("t-open").textContent = acct.open_trade_count ?? "–"; $("t-open-foot").innerHTML = `unrealized ${signed(Number(acct.unrealized_pl))}`;
+    $("t-day").innerHTML = dayStart ? signed((eq.equity - dayStart) / dayStart * 100, 2, "%") : "–";
+    $("t-open").textContent = eq.open ?? "–"; $("t-open-foot").innerHTML = `unrealized ${signed(eq.upl)}`;
+  } else {
+    $("t-nav").textContent = "–"; $("t-nav-foot").textContent = "set when the engine first runs this experiment";
   }
-  const m = eng.market;
+  const m = s.market;
+  $("t-price-label").textContent = T.pair(info.instrument || (m && m.instrument) || "");
   if (m) {
-    $("t-price-label").textContent = (m.instrument || "EUR_USD").replace("_", "/");
     $("t-price").textContent = m.bid ? fmt((m.bid + m.ask) / 2, 5) : "–";
     $("t-price-foot").textContent = m.market_open === false ? "market closed" : `spread ${fmt(m.spread_pips, 1)} pips · ${m.stream_connected ? "live" : "stream down"}`;
   }
@@ -217,7 +240,7 @@ function renderStatus(s, account) {
 
 // Signature: the path the latest 15-minute decision took.
 function renderPipe(s) {
-  const lc = (s.engine || {}).last_cycle;
+  const lc = (s.experiment_status || {}).last_cycle;
   if (!lc) { $("pipe").innerHTML = `<div class="empty">Waiting for the first 15-minute cycle.</div>`; $("last-link").innerHTML = ""; return; }
   const step = (key, mark, value, sub, off) => `<div class="pipe-step ${off ? "off" : ""}"><div class="k"><span class="mark m-${mark}">${{pass: "✓", fail: "✗", pend: "◷", info: "•", off: ""}[mark]}</span><span class="lbl">${key}</span></div><div class="v" data-k="${key}">${value}</div>${sub ? `<div class="s">${sub}</div>` : ""}</div>`;
   const decided = lc.candle_time ? new Date(new Date(lc.candle_time).getTime() + 15 * 60000).toISOString() : null;
@@ -236,6 +259,20 @@ function renderPipe(s) {
   else steps.push(step("Order", lc.order_status === "FILLED" ? "pass" : ["REJECTED", "CANCELLED", "FAILED"].includes(lc.order_status) ? "fail" : "pend", esc(pretty(lc.order_status)), ""));
   $("pipe").innerHTML = steps.join("");
   $("last-link").innerHTML = lc.request_id ? `<a href="/history/r-${lc.request_id}">Open timeline →</a>` : "";
+}
+
+// The experiment's equity: its balance after each closed trade, then its live equity now.
+// Without an experiment capital yet, the shared account's NAV.
+function equitySeries(status, account) {
+  const e = account && account.experiment;
+  if (!e) { $("chart-title").textContent = "Account value · last 7 days"; return account.series || []; }
+  $("chart-title").textContent = "Experiment equity · last 7 days";
+  const live = (status.experiment_status || {}).equity;
+  return [
+    {t: e.start.t, nav: e.start.balance, balance: e.start.balance},
+    ...(e.series || []).map(p => ({t: p.t, nav: p.balance, balance: p.balance})),
+    {t: new Date().toISOString(), nav: live ? Number(live.equity) : e.equity, balance: e.balance},
+  ];
 }
 
 // NAV chart: single series, hover crosshair + tooltip, table view.
@@ -339,15 +376,18 @@ async function control(path, body, confirmText) {
   if (confirmText && !confirm(confirmText)) return;
   try { await api(path, {method: "POST", body: JSON.stringify(body || {})}); await refresh(); } catch (e) { alert(`That didn't go through: ${e.message}`); }
 }
-$("btn-kill").onclick = () => {
-  const active = !(T.status?.controls?.kill_switch?.active);
-  const reason = active ? prompt("Why are you stopping trading? (shown in the log)", "manual stop") : "";
+function killSwitch(experiment, active) {
+  const scope = experiment ? "this experiment" : "all experiments";
+  const reason = active ? prompt(`Why are you stopping ${scope}? (shown in the log)`, "manual stop") : "";
   if (reason === null) return;
-  control("/api/controls/kill-switch", {active, reason}, active ? null : "Resume trading? New trades will be allowed again.");
-};
-$("btn-flatten").onclick = () => control("/api/controls/flatten", {reason: "dashboard"}, "Close ALL open trades at market price? The engine does this within a few seconds.");
-$("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset the daily loss limit? Today's loss will be measured from the current account value.");
-$("btn-reset-dd").onclick = () => control("/api/controls/reset-breaker/drawdown", {}, "Reset the drawdown limit? Drawdown will be measured from the current account value.");
+  control("/api/controls/kill-switch", {active, reason, experiment}, active ? null : `Resume ${scope}? New trades will be allowed again.`);
+}
+$("btn-kill").onclick = () => killSwitch(T.experiment, !(T.status?.controls?.experiment_kill_switch?.active));
+$("btn-kill-all").onclick = () => killSwitch(null, !(T.status?.controls?.global_kill_switch?.active));
+$("btn-flatten").onclick = () => control("/api/controls/flatten", {reason: "dashboard", experiment: T.experiment}, "Close this experiment's open trades at market price? The engine does this within a few seconds.");
+$("btn-flatten-all").onclick = () => control("/api/controls/flatten", {reason: "dashboard (all)"}, "Close EVERY open trade on the account, for all experiments, at market price?");
+$("btn-reset-daily").onclick = () => control("/api/controls/reset-breaker/daily", {}, "Reset this experiment's daily loss limit? Today's loss will be measured from its current equity.");
+$("btn-reset-dd").onclick = () => control("/api/controls/reset-breaker/drawdown", {}, "Reset this experiment's drawdown limit? Drawdown will be measured from its current equity.");
 document.querySelectorAll("#p-trades .seg button").forEach(b => b.onclick = () => { onlyLlm = b.dataset.llm === "1"; document.querySelectorAll("#p-trades .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
 document.querySelectorAll("#p-info .seg button").forEach(b => b.onclick = () => { minLevel = b.dataset.lvl; document.querySelectorAll("#p-info .seg button").forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
 // Tabbed panels: show one list at a time, plus the header extras (data-for) that belong to it.

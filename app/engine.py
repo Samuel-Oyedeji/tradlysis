@@ -41,6 +41,7 @@ from app.config.store import (
     import_env_once,
     load_configuration,
     set_experiment_capital,
+    single_experiment,
 )
 from app.db.bootstrap import auto_create_tables
 from app.db.control import experiment_controls, get_all_controls, scoped, set_control
@@ -106,16 +107,6 @@ class MarketCycle:
     tick: PriceTick | None = None
     now: datetime | None = None
     regime_recorded: bool = False
-
-
-def single_experiment(settings: Settings) -> Configuration:
-    """A configuration with one experiment taken straight from ``settings`` (tests, scripts)."""
-    exp = ExperimentConfig(
-        id=0, slug=settings.experiment_name, name=settings.experiment_name, description=None,
-        instrument=settings.instrument, strategy="trend_pullback", enabled=True, capital=None,
-        overrides={}, settings=settings,
-    )
-    return Configuration(settings=settings, experiments=[exp])
 
 
 def startup_problem(config: Configuration) -> str | None:

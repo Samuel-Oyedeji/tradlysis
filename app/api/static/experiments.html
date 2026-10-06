@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Experiments · Tradlysis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<style>
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; margin-top: 16px; }
+.card { display: flex; flex-direction: column; }
+.card .panel-h h2 { font-size: 14px; }
+.card .panel-h .pair { font: 600 12px var(--mono); color: var(--ink-3); }
+.card dl.kv { padding: 14px 16px; }
+.card .acts { margin-top: auto; padding: 0 16px 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+.card .acts .btn { flex: 1; }
+.state { font-size: 12px; padding: 0 16px; margin-top: 12px; display: flex; align-items: center; gap: 6px; color: var(--ink-2); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="side" id="side"></aside>
+  <div>
+    <header class="topbar" id="topbar"></header>
+    <main class="main">
+      <div class="page-h"><h1>Experiments</h1><span class="muted" id="updated"></span></div>
+      <div class="note">All experiments trade on the same broker account. Each one has its own capital and risk limits:
+        its equity is its capital plus the profit and loss of its own trades. <a href="/config">Add or change experiments →</a></div>
+
+      <section class="tiles" aria-label="Broker account">
+        <div class="panel tile"><div class="label">Account value (NAV)</div><div class="value" id="a-nav">–</div><div class="foot" id="a-nav-foot">shared by every experiment</div></div>
+        <div class="panel tile"><div class="label">Open trades</div><div class="value" id="a-open">–</div><div class="foot" id="a-open-foot"></div></div>
+        <div class="panel tile"><div class="label">Margin available</div><div class="value" id="a-margin">–</div><div class="foot">account-wide</div></div>
+        <div class="panel tile"><div class="label">Experiments running</div><div class="value" id="a-running">–</div><div class="foot" id="a-running-foot"></div></div>
+      </section>
+
+      <div class="cards" id="cards"><div class="panel empty">Loading…</div></div>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-h"><h2>Side by side</h2></div>
+        <div class="panel-b flush scroll-x" id="table"></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="/assets/app.js"></script>
+<script>
+const {esc, fmt, short, signed, api, pair} = T;
+const $ = (id) => document.getElementById(id);
+T.renderShell("experiments");
+
+function open(slug, path) { T.selectExperiment(slug, path); }
+
+function card(e) {
+  const eq = e.equity;
+  const state = !e.enabled ? ["d-off", "Switched off"] : e.halted ? ["d-bad", e.halted] : e.running ? ["d-good", "Running"] : ["d-warn", "Not running yet"];
+  const row = (k, v) => `<dt>${esc(k)}</dt><dd>${v}</dd>`;
+  return `<section class="panel card">
+    <div class="panel-h"><h2>${esc(e.name)}</h2><span class="pair">${esc(pair(e.instrument))}</span></div>
+    <div class="state"><span class="dot ${state[0]}"></span>${esc(state[1])}</div>
+    <dl class="kv">
+      ${row("Equity", eq ? `<span class="num">${fmt(Number(eq.equity))}</span>` : (e.capital ? `<span class="num">${fmt(Number(e.capital) + e.realized_pl + e.unrealized_pl)}</span>` : "–"))}
+      ${row("Capital", e.capital ? `<span class="num">${fmt(Number(e.capital))}</span>` : '<span class="muted">from the account balance</span>')}
+      ${row("Realized P/L", signed(e.realized_pl))}
+      ${row("Open trades", `<span class="num">${e.open_trades}</span>${e.open_trades ? ` · ${signed(e.unrealized_pl)}` : ""}`)}
+      ${row("Closed trades", `<span class="num">${e.closed_trades}</span>${e.win_rate != null ? ` · ${fmt(e.win_rate * 100, 0)}% won` : ""}`)}
+      ${row("Total R", signed(e.total_r, 2, "R"))}
+      ${row("Risk / trade", `<span class="num">${fmt(e.risk_per_trade_pct)}%</span> · min R:R <span class="num">${fmt(e.min_risk_reward, 1)}</span>`)}
+      ${row("Model", `<span class="mono" style="font-size:12px">${esc(e.model)}</span>`)}
+      ${row("Last decision", esc(short(e.last_decision)))}
+    </dl>
+    <div class="acts">
+      <button class="btn" type="button" data-open="${esc(e.slug)}" data-path="/">Overview</button>
+      <button class="btn" type="button" data-open="${esc(e.slug)}" data-path="/analysis">Analysis</button>
+    </div>
+  </section>`;
+}
+
+function table(list) {
+  if (!list.length) return `<div class="empty">No experiments yet.</div>`;
+  return `<table class="t"><thead><tr><th>Experiment</th><th>Pair</th><th>State</th><th class="num">Equity</th><th class="num">Realized P/L</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Total R</th><th class="num">Risk/trade</th></tr></thead><tbody>${list.map(e => {
+    const eq = e.equity ? Number(e.equity.equity) : e.capital ? Number(e.capital) + e.realized_pl + e.unrealized_pl : null;
+    const state = !e.enabled ? "off" : e.halted ? e.halted : e.running ? "running" : "starting";
+    return `<tr class="click" data-open="${esc(e.slug)}" data-path="/" tabindex="0"><td><b>${esc(e.name)}</b></td><td class="mono">${esc(pair(e.instrument))}</td><td>${esc(state)}</td><td class="num">${eq == null ? "–" : fmt(eq)}</td><td class="num">${signed(e.realized_pl)}</td><td class="num">${e.closed_trades}${e.open_trades ? ` +${e.open_trades} open` : ""}</td><td class="num">${e.win_rate == null ? "–" : fmt(e.win_rate * 100, 0) + "%"}</td><td class="num">${signed(e.total_r, 2, "R")}</td><td class="num">${fmt(e.risk_per_trade_pct)}%</td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+async function refresh() {
+  let d;
+  T.refreshStatus();
+  try { d = await api("/api/experiments"); } catch (e) { $("cards").innerHTML = `<div class="panel empty">Could not load experiments: ${esc(e.message)}</div>`; return; }
+  const list = d.experiments || [], a = d.account;
+  if (a) {
+    $("a-nav").textContent = fmt(Number(a.nav)); $("a-nav-foot").textContent = `${a.currency} · balance ${fmt(Number(a.balance))}`;
+    $("a-open").textContent = a.open_trade_count; $("a-open-foot").innerHTML = `unrealized ${signed(Number(a.unrealized_pl))}`;
+    $("a-margin").textContent = fmt(Number(a.margin_available));
+  }
+  $("a-running").textContent = `${list.filter(e => e.running).length} / ${list.length}`;
+  $("a-running-foot").textContent = d.engine_alive ? `${list.filter(e => e.enabled).length} enabled` : "engine offline";
+  $("cards").innerHTML = list.length ? list.map(card).join("") : `<div class="panel empty">No experiments yet. <a href="/config">Create one on the Config page.</a></div>`;
+  $("table").innerHTML = table(list);
+  document.querySelectorAll("[data-open]").forEach(el => {
+    el.onclick = () => open(el.dataset.open, el.dataset.path);
+    el.onkeydown = (ev) => { if (ev.key === "Enter") open(el.dataset.open, el.dataset.path); };
+  });
+  $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+refresh(); setInterval(refresh, 15000);
+</script>
+</body>
+</html>

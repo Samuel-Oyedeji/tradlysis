@@ -189,7 +189,7 @@ class ExperimentConfig:
             "instrument": self.instrument,
             "strategy": self.strategy,
             "enabled": self.enabled,
-            "capital": None if self.capital is None else str(self.capital),
+            "capital": None if self.capital is None else format(self.capital.normalize(), "f"),
         }
 
 
@@ -214,6 +214,17 @@ class Configuration:
 
 
 # ---------------------------------------------------------------------- merging
+
+
+def single_experiment(settings: Settings) -> Configuration:
+    """A configuration with one experiment taken straight from ``settings`` (tests, scripts)."""
+    exp = ExperimentConfig(
+        id=0, slug=settings.experiment_name, name=settings.experiment_name, description=None,
+        instrument=settings.instrument, strategy="trend_pullback", enabled=True, capital=None,
+        overrides={}, settings=settings,
+    )
+    return Configuration(settings=settings, experiments=[exp])
+
 
 
 def _validate(values: dict[str, Any], scope: str) -> Settings:
@@ -484,7 +495,10 @@ async def save_experiment(
 
         changed: list[tuple[str, Any, Any]] = []
         for k in ("name", "description", "instrument", "strategy", "enabled", "capital"):
-            if before[k] != after[k] or create:
+            if create:
+                if after[k] not in (None, "", False):
+                    changed.append((k, None, after[k]))
+            elif before[k] != after[k]:
                 changed.append((k, before[k], after[k]))
         for k in sorted(set(before["settings"]) | set(after["settings"])):
             if before["settings"].get(k) != after["settings"].get(k):

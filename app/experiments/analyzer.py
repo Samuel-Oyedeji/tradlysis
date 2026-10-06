@@ -1,4 +1,4 @@
-"""Experiment Analyzer: periodically summarises the live experiment. Never trades.
+"""Experiment Analyzer: periodically summarises every experiment. Never trades.
 
 Run continuously:  python -m app.experiments.analyzer
 Run once & print:  python -m app.experiments.analyzer --once
@@ -15,12 +15,14 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 
 from app.api.history import DECISION_BAR, HYPOTHETICAL_HORIZON, hypothetical_outcome, load_bars
 from app.config.settings import Settings, get_settings
+from app.config.store import import_env_once, load_configuration, single_experiment
 from app.db.bootstrap import auto_create_tables
 from app.db.enums import TradeState
 from app.db.models import (
@@ -332,7 +334,11 @@ def trade_outcomes(closed: Sequence[ClosedTrade], recent: int = 50) -> dict[str,
 # ---------------------------------------------------------------------- DB loading
 
 
-async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) -> dict[str, Any]:
+async def analyze(
+    db: Database, settings: Settings, pip_size: float = 0.0001, capital: Decimal | None = None
+) -> dict[str, Any]:
+    """Metrics for one experiment. Its drawdown in % is measured on its own equity (``capital`` plus
+    realized P/L after each closed trade); without a capital, on the broker account's NAV."""
     exp = settings.experiment_name
     async with db.session() as s:
         reqs = (await s.scalars(select(DecisionRequest).where(DecisionRequest.experiment == exp))).all()
@@ -343,7 +349,13 @@ async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) ->
         ords = (await s.scalars(select(Order).where(Order.risk_check_id.in_(rc_ids)))).all() if rc_ids else []
         trades = (await s.scalars(select(Trade).where(Trade.experiment == exp))).all()
         unexpected = (await s.scalars(select(Trade).where(Trade.unexpected.is_(True)))).all()
-        navs = (await s.scalars(select(AccountSnapshot.nav).order_by(AccountSnapshot.taken_at))).all()
+        if capital is None:
+            navs = (await s.scalars(select(AccountSnapshot.nav).order_by(AccountSnapshot.taken_at))).all()
+        else:
+            navs = [capital]
+            for t in sorted((t for t in trades if t.state == TradeState.CLOSED and t.close_time),
+                            key=lambda t: t.close_time):
+                navs.append(navs[-1] + (t.realized_pl or 0))
         close_reasons = await bot_close_reasons(s)
         now = utcnow()
         hypo = await _rr_only_hypotheticals(s, settings.instrument, reqs)
@@ -439,8 +451,8 @@ async def _rr_only_hypotheticals(s: Any, instrument: str, reqs: Sequence[Decisio
     return out
 
 
-async def run_once(db: Database, settings: Settings) -> dict[str, Any]:
-    metrics = await analyze(db, settings)
+async def run_once(db: Database, settings: Settings, capital: Decimal | None = None) -> dict[str, Any]:
+    metrics = await analyze(db, settings, capital=capital)
     period_start: datetime | None = metrics.pop("period_start")
     now = utcnow()
     async with db.session() as s:
@@ -460,26 +472,36 @@ async def run_once(db: Database, settings: Settings) -> dict[str, Any]:
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Tradlysis experiment analyzer")
     parser.add_argument("--once", action="store_true", help="run a single analysis, print it and exit")
+    parser.add_argument("--experiment", help="only this experiment (its id); default: all of them")
     args = parser.parse_args()
-    settings = get_settings()
-    setup_logging(settings.log_level)
-    db = Database(settings)
+    base = get_settings()
+    setup_logging(base.log_level)
+    db = Database(base)
     try:
-        await auto_create_tables(db, settings)
-        if args.once:
-            print(json.dumps(await run_once(db, settings), indent=2, default=str))
-            return
+        await auto_create_tables(db, base)
+        await import_env_once(db, base)
         while True:
-            try:
-                m = await run_once(db, settings)
-                log.info(
-                    "Analysis stored: %s opportunities, %s closed trades",
-                    m["opportunities"],
-                    m["closed_trades"].get("trades", 0),
-                )
-            except Exception:
-                log.exception("analysis failed")
-            await asyncio.sleep(settings.analyzer_interval_minutes * 60)
+            config = await load_configuration(db, base)
+            experiments = config.experiments or single_experiment(config.settings).experiments
+            if args.experiment:
+                experiments = [e for e in experiments if e.slug == args.experiment]
+            reports = {}
+            for e in experiments:
+                try:
+                    m = await run_once(db, e.settings, capital=e.capital)
+                    reports[e.slug] = m
+                    log.info(
+                        "Analysis stored for %s: %s opportunities, %s closed trades",
+                        e.slug,
+                        m["opportunities"],
+                        m["closed_trades"].get("trades", 0),
+                    )
+                except Exception:
+                    log.exception("analysis of %s failed", e.slug)
+            if args.once:
+                print(json.dumps(reports, indent=2, default=str))
+                return
+            await asyncio.sleep(config.settings.analyzer_interval_minutes * 60)
     finally:
         await db.dispose()
 

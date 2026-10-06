@@ -1,16 +1,21 @@
 """FastAPI control plane and mobile dashboard.
 
-The API only reads the database and writes control flags. It never talks to the broker:
-the engine's executor remains the only component that submits orders (a "flatten" request
-is a flag the engine picks up).
+The API only reads the database and writes control flags and configuration. It never talks to
+the broker: the engine's executor remains the only component that submits orders (a "flatten"
+request is a flag the engine picks up).
+
+Experiment pages take ``?experiment=<slug>`` (default: the first enabled experiment). The config
+page (``/config``) additionally needs CONFIG_PASSWORD, which unlocks it for a while.
 
 Run with ``uvicorn app.api.main:app --host 0.0.0.0 --port 8000``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
+import time
 from bisect import bisect_left
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -26,11 +31,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Date, cast, desc, func, select
 
 from app.api import history
+from app.config import store
 from app.config.settings import Settings, get_settings
+from app.config.store import Configuration, ExperimentConfig, ExperimentInput
 from app.db.bootstrap import auto_create_tables
-from app.db.control import get_all_controls, set_control
+from app.db.control import experiment_controls, get_all_controls, scoped, set_control
 from app.db.control import reset_breaker as reset_breaker_control
-from app.db.enums import ControlKey
+from app.db.enums import ControlKey, TradeState
 from app.db.models import (
     AccountSnapshot,
     AnalysisReport,
@@ -51,6 +58,10 @@ log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 HEARTBEAT_MAX_AGE_SECONDS = 60
 CSRF_HEADER_VALUE = "tradlysis"
+CONFIG_CACHE_SECONDS = 3.0
+CONFIG_UNLOCK_SECONDS = 15 * 60
+CONFIG_MAX_FAILED_UNLOCKS = 5  # per CONFIG_UNLOCK_LOCKOUT_SECONDS
+CONFIG_UNLOCK_LOCKOUT_SECONDS = 5 * 60
 
 security = HTTPBasic(auto_error=False)
 
@@ -58,10 +69,38 @@ security = HTTPBasic(auto_error=False)
 class KillSwitchBody(BaseModel):
     active: bool
     reason: str = Field(default="", max_length=200)
+    experiment: str | None = None  # None: every experiment (the account-wide switch)
 
 
 class ReasonBody(BaseModel):
     reason: str = Field(default="", max_length=200)
+    experiment: str | None = None  # None: every position on the account
+
+
+class UnlockBody(BaseModel):
+    password: str = Field(max_length=500)
+
+
+class GlobalConfigBody(BaseModel):
+    # key -> new value; null removes the stored value (back to the ENV or default value)
+    values: dict[str, str | None]
+
+
+class ExperimentBody(BaseModel):
+    slug: str | None = Field(default=None, max_length=63)  # creating only
+    name: str | None = Field(default=None, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    instrument: str | None = Field(default=None, max_length=20)
+    strategy: str | None = Field(default=None, max_length=40)
+    enabled: bool | None = None
+    capital: str | None = Field(default=None, max_length=40)
+    settings: dict[str, str | None] | None = None
+
+    def to_input(self) -> ExperimentInput:
+        return ExperimentInput(
+            name=self.name, description=self.description, instrument=self.instrument, strategy=self.strategy,
+            enabled=self.enabled, capital=self.capital, settings=self.settings,
+        )
 
 
 def create_app(settings: Settings | None = None, db: Database | None = None) -> FastAPI:
@@ -73,8 +112,9 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         if db is None:
             try:
                 await auto_create_tables(app.state.db, settings)
+                await store.import_env_once(app.state.db, settings)
             except Exception:
-                log.exception("could not check/create database tables")
+                log.exception("could not check/create database tables or import the configuration")
         yield
         await app.state.db.dispose()
 
@@ -110,6 +150,48 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         if x_requested_with != CSRF_HEADER_VALUE:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Missing X-Requested-With header")
 
+    # ------------------------------------------------------------------ configuration & experiments
+
+    config_cache: dict[str, Any] = {"at": 0.0, "value": None}
+    config_lock = asyncio.Lock()
+
+    async def load_config(database: Database, *, fresh: bool = False) -> Configuration:
+        async with config_lock:
+            if fresh or config_cache["value"] is None or time.monotonic() - config_cache["at"] > CONFIG_CACHE_SECONDS:
+                config = await store.load_configuration(database, settings)
+                if not config.experiments:
+                    # Nothing stored yet (e.g. a database the engine never started on): the ENV's experiment.
+                    config.experiments = store.single_experiment(config.settings).experiments
+                config_cache.update(at=time.monotonic(), value=config)
+            return config_cache["value"]
+
+    async def get_config(database: Database = Depends(get_db)) -> Configuration:
+        return await load_config(database)
+
+    async def get_experiment(
+        experiment: str | None = Query(None, max_length=63), config: Configuration = Depends(get_config)
+    ) -> ExperimentConfig:
+        slug = experiment or config.default_slug()
+        exp = config.get(slug or "")
+        if exp is None:
+            raise HTTPException(404, f"unknown experiment {experiment!r}")
+        return exp
+
+    unlock_tokens: dict[str, tuple[str, float]] = {}
+    failed_unlocks: list[float] = []
+
+    def require_config_unlock(
+        user: str = Depends(require_auth), x_config_token: str | None = Header(default=None)
+    ) -> str:
+        if not settings.config_password:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "CONFIG_PASSWORD is not set; the config page is locked.")
+        now = time.monotonic()
+        entry = unlock_tokens.get(x_config_token or "")
+        if entry is None or entry[1] < now or entry[0] != user:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Config page locked", headers={"X-Config-Locked": "1"})
+        unlock_tokens[x_config_token or ""] = (user, now + CONFIG_UNLOCK_SECONDS)  # sliding expiry
+        return user
+
     # ------------------------------------------------------------------ public
 
     @app.get("/health")
@@ -119,6 +201,10 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @app.get("/", include_in_schema=False)
     async def dashboard(_: str = Depends(require_auth)) -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/experiments", include_in_schema=False)
+    async def experiments_page(_: str = Depends(require_auth)) -> FileResponse:
+        return FileResponse(STATIC_DIR / "experiments.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/analysis", include_in_schema=False)
     async def analysis_page(_: str = Depends(require_auth)) -> FileResponse:
@@ -137,13 +223,14 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
         _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
         database: Database = Depends(get_db),
     ) -> dict[str, Any]:
         async with database.session() as s:
-            chains = await history.load_chains(s, settings.experiment_name)
+            chains = await history.load_chains(s, exp.slug)
             decided = [c.request.candle_time + history.DECISION_BAR for c in chains if c.request is not None]
             bars = (
-                await history.load_bars(s, settings.instrument, min(decided), max(decided) + history.HYPOTHETICAL_HORIZON)
+                await history.load_bars(s, exp.instrument, min(decided), max(decided) + history.HYPOTHETICAL_HORIZON)
                 if decided
                 else []
             )
@@ -189,7 +276,8 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
                 end = t.close_time
             elif t is not None:
                 end = utcnow()
-            bars = await history.load_bars(s, settings.instrument, start - timedelta(hours=3), end + timedelta(hours=2))
+            instrument = req.instrument if req else t.instrument  # type: ignore[union-attr]
+            bars = await history.load_bars(s, instrument, start - timedelta(hours=3), end + timedelta(hours=2))
             if t is not None:
                 ex = await excursion.trade_excursion(s, t, utcnow())
                 chain.excursion = ex.to_dict() if ex else None
@@ -225,31 +313,129 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     # ------------------------------------------------------------------ status
 
     @app.get("/api/status")
-    async def get_status(_: str = Depends(require_auth), database: Database = Depends(get_db)) -> dict[str, Any]:
+    async def get_status(
+        _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
+        config: Configuration = Depends(get_config),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Engine and control state, seen from one experiment (``controls`` merges its own flags
+        over the account-wide kill switch; ``experiment_status`` is its part of the heartbeat)."""
         async with database.session() as s:
-            controls = await get_all_controls(s)
-        hb = controls.pop(str(ControlKey.ENGINE_HEARTBEAT), None)
+            all_controls = await get_all_controls(s)
+        hb = all_controls.get(str(ControlKey.ENGINE_HEARTBEAT))
         engine_alive = False
         hb_age = None
         if hb and hb.get("at"):
             hb_age = (utcnow() - datetime.fromisoformat(hb["at"])).total_seconds()
             engine_alive = hb_age <= HEARTBEAT_MAX_AGE_SECONDS
+        mine = experiment_controls(all_controls, exp.slug)
+        global_kill = all_controls.get(str(ControlKey.KILL_SWITCH)) or {}
+        own_kill = mine.get(str(ControlKey.KILL_SWITCH)) or {}
+        controls = {
+            **mine,
+            "kill_switch": global_kill if global_kill.get("active") else own_kill,
+            "global_kill_switch": global_kill,
+            "experiment_kill_switch": own_kill,
+        }
+        engine_exp = ((hb or {}).get("experiments") or {}).get(exp.slug)
         return {
             "now": utcnow().isoformat(),
             "mode": settings.trading_mode.value,
-            "experiment": settings.experiment_name,
+            "experiment": exp.slug,
+            "experiment_info": exp.summary(),
+            "experiments": [e.summary() for e in config.experiments],
             "engine_alive": engine_alive,
+            "engine_state": (hb or {}).get("state", "RUNNING") if hb else None,
+            "engine_reason": (hb or {}).get("reason"),
+            "running": engine_exp is not None,
             "heartbeat_age_seconds": None if hb_age is None else round(hb_age, 1),
             "engine": hb,
+            "experiment_status": engine_exp,
+            "market": ((hb or {}).get("markets") or {}).get(exp.instrument),
             "controls": controls,
+            "config_version": config.version,
+            "config_pending": bool(hb and hb.get("config_version") not in (None, config.version)),
         }
+
+    @app.get("/api/experiments")
+    async def experiments_overview(
+        _: str = Depends(require_auth),
+        config: Configuration = Depends(get_config),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Every experiment side by side: equity, results, open trades and state."""
+        slugs = [e.slug for e in config.experiments]
+        async with database.session() as s:
+            all_controls = await get_all_controls(s)
+            rows = (
+                await s.execute(
+                    select(
+                        Trade.experiment,
+                        func.count().filter(Trade.state == str(TradeState.CLOSED)),
+                        func.count().filter(Trade.state == str(TradeState.CLOSED), Trade.r_multiple > 0),
+                        func.coalesce(func.sum(Trade.r_multiple).filter(Trade.state == str(TradeState.CLOSED)), 0),
+                        func.coalesce(func.sum(Trade.realized_pl).filter(Trade.state == str(TradeState.CLOSED)), 0),
+                        func.count().filter(Trade.state == str(TradeState.OPEN)),
+                        func.coalesce(func.sum(Trade.unrealized_pl).filter(Trade.state == str(TradeState.OPEN)), 0),
+                    )
+                    .where(Trade.experiment.in_(slugs))
+                    .group_by(Trade.experiment)
+                )
+            ).all()
+            last = dict(
+                (
+                    await s.execute(
+                        select(DecisionRequest.experiment, func.max(DecisionRequest.candle_time))
+                        .where(DecisionRequest.experiment.in_(slugs))
+                        .group_by(DecisionRequest.experiment)
+                    )
+                ).all()
+            )
+        stats = {r[0]: r[1:] for r in rows}
+        hb = all_controls.get(str(ControlKey.ENGINE_HEARTBEAT)) or {}
+        alive = bool(hb.get("at")) and (utcnow() - datetime.fromisoformat(hb["at"])).total_seconds() <= HEARTBEAT_MAX_AGE_SECONDS
+        global_kill = bool((all_controls.get(str(ControlKey.KILL_SWITCH)) or {}).get("active"))
+        out = []
+        for e in config.experiments:
+            closed, wins, total_r, pl, n_open, upl = stats.get(e.slug, (0, 0, 0, 0, 0, 0))
+            mine = experiment_controls(all_controls, e.slug)
+            running = alive and e.slug in (hb.get("experiments") or {})
+            eq = ((hb.get("experiments") or {}).get(e.slug) or {}).get("equity") if running else None
+            halted = (
+                "Kill switch on" if global_kill or (mine.get("kill_switch") or {}).get("active")
+                else "Daily limit hit" if (mine.get("daily_loss_breaker") or {}).get("tripped")
+                else "Drawdown limit hit" if (mine.get("drawdown_breaker") or {}).get("tripped")
+                else None
+            )
+            out.append({
+                **e.summary(),
+                "running": running,
+                "halted": halted,
+                "equity": eq,
+                "closed_trades": closed,
+                "wins": wins,
+                "win_rate": round(wins / closed, 3) if closed else None,
+                "total_r": round(float(total_r), 2),
+                "realized_pl": round(float(pl), 2),
+                "open_trades": n_open,
+                "unrealized_pl": round(float(upl), 2),
+                "last_decision": last[e.slug].isoformat() if last.get(e.slug) else None,
+                "risk_per_trade_pct": e.settings.risk_per_trade_pct,
+                "min_risk_reward": e.settings.min_risk_reward,
+                "model": e.settings.openrouter_model,
+            })
+        return {"experiments": out, "engine_alive": alive, "account": hb.get("account")}
 
     @app.get("/api/account")
     async def get_account(
         hours: int = Query(168, ge=1, le=24 * 365),
         _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
         database: Database = Depends(get_db),
     ) -> dict[str, Any]:
+        """The shared broker account (``latest``, ``series``) and the experiment's own equity:
+        capital plus realized P/L after each closed trade (``equity_series``), plus open P/L now."""
         since = utcnow() - timedelta(hours=hours)
         async with database.session() as s:
             rows = (
@@ -257,6 +443,38 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
                     select(AccountSnapshot).where(AccountSnapshot.taken_at >= since).order_by(AccountSnapshot.taken_at)
                 )
             ).all()
+            closed = (
+                await s.execute(
+                    select(Trade.close_time, Trade.realized_pl)
+                    .where(Trade.experiment == exp.slug, Trade.state == str(TradeState.CLOSED),
+                           Trade.close_time.is_not(None))
+                    .order_by(Trade.close_time)
+                )
+            ).all()
+            open_pl = await s.scalar(
+                select(func.coalesce(func.sum(Trade.unrealized_pl), 0))
+                .where(Trade.experiment == exp.slug, Trade.state == str(TradeState.OPEN))
+            )
+        equity = None
+        if exp.capital is not None:
+            balance = start_balance = exp.capital
+            points = []
+            for close_time, pl in closed:
+                if close_time < since:
+                    start_balance += pl or 0
+                balance += pl or 0
+                if close_time >= since:
+                    points.append({"t": close_time.isoformat(), "balance": float(balance)})
+            realized = sum((pl or 0 for _, pl in closed), start=exp.capital * 0)
+            equity = {
+                "capital": float(exp.capital),
+                "realized_pl": float(realized),
+                "unrealized_pl": float(open_pl or 0),
+                "balance": float(exp.capital + realized),
+                "equity": float(exp.capital + realized + (open_pl or 0)),
+                "start": {"t": since.isoformat(), "balance": float(start_balance)},
+                "series": points,
+            }
         step = max(1, len(rows) // 300)
         series = [
             {"t": r.taken_at.isoformat(), "nav": float(r.nav), "balance": float(r.balance)}
@@ -266,6 +484,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             series.append({"t": rows[-1].taken_at.isoformat(), "nav": float(rows[-1].nav), "balance": float(rows[-1].balance)})
         latest = rows[-1] if rows else None
         return {
+            "experiment": equity,
             "latest": None
             if latest is None
             else {
@@ -287,9 +506,16 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         state: str | None = Query(None, pattern="^(OPEN|CLOSED)$"),
         limit: int = Query(50, ge=1, le=500),
         _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
         database: Database = Depends(get_db),
     ) -> list[dict[str, Any]]:
-        q = select(Trade).order_by(desc(Trade.open_time)).limit(limit)
+        # The experiment's trades, plus positions no experiment owns (opened by hand on the account).
+        q = (
+            select(Trade)
+            .where((Trade.experiment == exp.slug) | Trade.experiment.is_(None))
+            .order_by(desc(Trade.open_time))
+            .limit(limit)
+        )
         if state:
             q = q.where(Trade.state == state)
         now = utcnow()
@@ -300,6 +526,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         return [
             {
                 "id": t.id,
+                "experiment": t.experiment,
                 "broker_trade_id": t.broker_trade_id,
                 "instrument": t.instrument,
                 "direction": t.direction,
@@ -328,13 +555,14 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         limit: int = Query(50, ge=1, le=500),
         only_llm: bool = False,
         _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
         database: Database = Depends(get_db),
     ) -> list[dict[str, Any]]:
         q = (
             select(DecisionRequest, Decision, RiskCheck)
             .outerjoin(Decision, Decision.request_id == DecisionRequest.id)
             .outerjoin(RiskCheck, RiskCheck.request_id == DecisionRequest.id)
-            .where(DecisionRequest.experiment == settings.experiment_name)
+            .where(DecisionRequest.experiment == exp.slug)
             .order_by(desc(DecisionRequest.candle_time))
             .limit(limit)
         )
@@ -392,15 +620,18 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         limit: int = Query(100, ge=1, le=1000),
         min_level: str = Query("INFO", pattern="^(INFO|WARNING|ERROR|CRITICAL)$"),
         _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
         database: Database = Depends(get_db),
     ) -> list[dict[str, Any]]:
+        """The experiment's events and account-wide ones (other experiments' events are left out)."""
         levels = ["INFO", "WARNING", "ERROR", "CRITICAL"]
         allowed = levels[levels.index(min_level) :]
+        tag = SystemEvent.details["experiment"].astext
         async with database.session() as s:
             rows = (
                 await s.scalars(
                     select(SystemEvent)
-                    .where(SystemEvent.level.in_(allowed))
+                    .where(SystemEvent.level.in_(allowed), (tag == exp.slug) | tag.is_(None))
                     .order_by(desc(SystemEvent.created_at))
                     .limit(limit)
                 )
@@ -413,14 +644,19 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
                 "component": e.component,
                 "event_type": e.event_type,
                 "message": e.message,
+                "experiment": (e.details or {}).get("experiment"),
             }
             for e in rows
         ]
 
     @app.get("/api/news")
-    async def get_news(_: str = Depends(require_auth), database: Database = Depends(get_db)) -> dict[str, Any]:
+    async def get_news(
+        _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
         now = utcnow()
-        base, quote = settings.instrument_currencies
+        base, quote = exp.settings.instrument_currencies
         async with database.session() as s:
             events = (
                 await s.scalars(
@@ -436,7 +672,10 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             ).all()
             interps = (
                 await s.scalars(
-                    select(NewsInterpretation).order_by(desc(NewsInterpretation.created_at)).limit(20)
+                    select(NewsInterpretation)
+                    .where(NewsInterpretation.currency.in_([base, quote]))
+                    .order_by(desc(NewsInterpretation.created_at))
+                    .limit(20)
                 )
             ).all()
         return {
@@ -467,11 +706,15 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         }
 
     @app.get("/api/analysis/latest")
-    async def get_analysis(_: str = Depends(require_auth), database: Database = Depends(get_db)) -> dict[str, Any]:
+    async def get_analysis(
+        _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
         async with database.session() as s:
             row = await s.scalar(
                 select(AnalysisReport)
-                .where(AnalysisReport.experiment == settings.experiment_name)
+                .where(AnalysisReport.experiment == exp.slug)
                 .order_by(desc(AnalysisReport.created_at))
                 .limit(1)
             )
@@ -480,21 +723,26 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         return {"report": {"created_at": row.created_at.isoformat(), "metrics": row.metrics}}
 
     @app.post("/api/analysis/run", dependencies=[Depends(require_csrf)])
-    async def run_analysis(_: str = Depends(require_auth), database: Database = Depends(get_db)) -> dict[str, Any]:
+    async def run_analysis(
+        _: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
         """Compute and store a fresh report now (what ``python -m app.experiments.analyzer --once`` does)."""
         from app.experiments.analyzer import run_once
 
-        metrics = await run_once(database, settings)
+        metrics = await run_once(database, exp.settings, capital=exp.capital)
         return {"report": {"created_at": utcnow().isoformat(), "metrics": metrics}}
 
     @app.get("/api/analysis/timeline")
     async def analysis_timeline(
         days: int = Query(default=30, ge=1, le=365),
         _: str = Depends(require_auth),
+        experiment: ExperimentConfig = Depends(get_experiment),
         database: Database = Depends(get_db),
     ) -> dict[str, Any]:
         """What the experiment did per UTC day: cycles, setups, model calls, signals, approvals, trades."""
-        exp = settings.experiment_name
+        exp = experiment.slug
         since = utcnow() - timedelta(days=days)
 
         def utc_day(col):
@@ -560,47 +808,161 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
 
     # ------------------------------------------------------------------ controls
 
+    def check_experiment(config: Configuration, slug: str | None) -> None:
+        if slug is not None and config.get(slug) is None:
+            raise HTTPException(404, f"unknown experiment {slug!r}")
+
     @app.post("/api/controls/kill-switch", dependencies=[Depends(require_csrf)])
     async def kill_switch(
-        body: KillSwitchBody, user: str = Depends(require_auth), database: Database = Depends(get_db)
+        body: KillSwitchBody,
+        user: str = Depends(require_auth),
+        config: Configuration = Depends(get_config),
+        database: Database = Depends(get_db),
     ) -> dict[str, Any]:
+        check_experiment(config, body.experiment)
         value = {"active": body.active, "reason": body.reason or ("dashboard" if body.active else ""), "at": utcnow().isoformat()}
+        scope = body.experiment or "all experiments"
         async with database.session() as s:
-            await set_control(s, ControlKey.KILL_SWITCH, value, f"api:{user}")
+            await set_control(s, scoped(ControlKey.KILL_SWITCH, body.experiment), value, f"api:{user}")
             s.add(
                 SystemEvent(
                     level="WARNING" if body.active else "INFO",
                     component="api",
                     event_type="KILL_SWITCH_ON" if body.active else "KILL_SWITCH_OFF",
-                    message=f"Kill switch {'activated' if body.active else 'released'} by {user}: {body.reason}",
-                    details={},
+                    message=f"Kill switch for {scope} {'activated' if body.active else 'released'} by {user}: {body.reason}",
+                    details={"experiment": body.experiment} if body.experiment else {},
                 )
             )
         return {"ok": True, "kill_switch": value}
 
     @app.post("/api/controls/flatten", dependencies=[Depends(require_csrf)])
-    async def flatten(body: ReasonBody, user: str = Depends(require_auth), database: Database = Depends(get_db)) -> dict[str, Any]:
+    async def flatten(
+        body: ReasonBody,
+        user: str = Depends(require_auth),
+        config: Configuration = Depends(get_config),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        check_experiment(config, body.experiment)
         value = {"requested": True, "reason": body.reason or f"dashboard ({user})", "at": utcnow().isoformat()}
         async with database.session() as s:
-            await set_control(s, ControlKey.FLATTEN_REQUEST, value, f"api:{user}")
+            await set_control(s, scoped(ControlKey.FLATTEN_REQUEST, body.experiment), value, f"api:{user}")
         return {"ok": True, "flatten_request": value}
 
     @app.post("/api/controls/reset-breaker/{which}", dependencies=[Depends(require_csrf)])
     async def reset_breaker(
-        which: str, user: str = Depends(require_auth), database: Database = Depends(get_db)
+        which: str,
+        user: str = Depends(require_auth),
+        exp: ExperimentConfig = Depends(get_experiment),
+        database: Database = Depends(get_db),
     ) -> dict[str, Any]:
         key = {"daily": ControlKey.DAILY_LOSS_BREAKER, "drawdown": ControlKey.DRAWDOWN_BREAKER}.get(which)
         if key is None:
             raise HTTPException(404, "unknown breaker")
         async with database.session() as s:
-            await reset_breaker_control(s, key, user)
+            await reset_breaker_control(s, key, user, exp.slug)
             s.add(
                 SystemEvent(
                     level="WARNING", component="api", event_type="BREAKER_RESET",
-                    message=f"{which} breaker reset by {user}", details={},
+                    message=f"{exp.slug}: {which} breaker reset by {user}", details={"experiment": exp.slug},
                 )
             )
         return {"ok": True}
+
+    # ------------------------------------------------------------------ config page
+
+    @app.get("/config", include_in_schema=False)
+    async def config_page(_: str = Depends(require_auth)) -> FileResponse:
+        return FileResponse(STATIC_DIR / "config.html", headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/config/unlock", dependencies=[Depends(require_csrf)])
+    async def unlock_config(body: UnlockBody, user: str = Depends(require_auth)) -> dict[str, Any]:
+        if not settings.config_password:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "CONFIG_PASSWORD is not set; the config page is locked.")
+        now = time.monotonic()
+        failed_unlocks[:] = [t for t in failed_unlocks if now - t < CONFIG_UNLOCK_LOCKOUT_SECONDS]
+        if len(failed_unlocks) >= CONFIG_MAX_FAILED_UNLOCKS:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many wrong passwords; try again in a few minutes.")
+        if not secrets.compare_digest(body.password.encode(), settings.config_password.encode()):
+            failed_unlocks.append(now)
+            await asyncio.sleep(1.0)
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong config password")
+        for token, (_, expires) in list(unlock_tokens.items()):
+            if expires < now:
+                unlock_tokens.pop(token, None)
+        token = secrets.token_urlsafe(32)
+        unlock_tokens[token] = (user, now + CONFIG_UNLOCK_SECONDS)
+        return {"token": token, "expires_in": CONFIG_UNLOCK_SECONDS}
+
+    @app.post("/api/config/lock", dependencies=[Depends(require_csrf)])
+    async def lock_config(x_config_token: str | None = Header(default=None), _: str = Depends(require_auth)) -> dict[str, Any]:
+        unlock_tokens.pop(x_config_token or "", None)
+        return {"ok": True}
+
+    @app.get("/api/config")
+    async def get_configuration(
+        _: str = Depends(require_config_unlock), database: Database = Depends(get_db)
+    ) -> dict[str, Any]:
+        config = await load_config(database, fresh=True)
+        env_set = settings.model_fields_set
+
+        def field_view(f: store.FieldInfo, value_settings: Settings, stored: dict[str, str], fallback: str) -> dict[str, Any]:
+            value = store.display_value(value_settings, f.key)
+            source = "app" if f.key in stored else fallback
+            return {
+                "key": f.key, "env": f.key.upper(), "group": f.group, "label": f.label, "help": f.help,
+                "kind": f.kind, "choices": list(f.choices), "secret": f.secret, "source": source,
+                # Secrets are never sent back; only whether one is set.
+                "value": None if f.secret else value,
+                "is_set": bool(value),
+            }
+
+        globals_ = [
+            field_view(f, config.settings, config.stored, "env" if f.key in env_set else "default")
+            for f in store.FIELDS if f.scope == store.GLOBAL_SCOPE
+        ]
+        exp_fields = [f for f in store.FIELDS if f.scope == store.EXPERIMENT_SCOPE]
+        return {
+            "version": config.version,
+            "mode": settings.trading_mode.value,
+            "global": globals_,
+            "experiment_fields": [field_view(f, config.settings, {}, "default") for f in exp_fields],
+            "experiments": [
+                {
+                    **e.summary(),
+                    "fields": [field_view(f, e.settings, e.overrides, "global") for f in exp_fields],
+                }
+                for e in config.experiments
+            ],
+            "strategies": store.STRATEGIES,
+            "env_only": [k.upper() for k in store.ENV_ONLY_KEYS],
+            "env_overridden": sorted(k.upper() for k in env_set & set(config.stored)),
+            "changes": await store.recent_changes(database, 30),
+        }
+
+    @app.put("/api/config", dependencies=[Depends(require_csrf)])
+    async def save_configuration(
+        body: GlobalConfigBody, user: str = Depends(require_config_unlock), database: Database = Depends(get_db)
+    ) -> dict[str, Any]:
+        changed = await store.save_global(database, settings, body.values, f"api:{user}")
+        await load_config(database, fresh=True)
+        return {"ok": True, "changed": changed}
+
+    @app.post("/api/config/experiments", dependencies=[Depends(require_csrf)])
+    async def create_experiment(
+        body: ExperimentBody, user: str = Depends(require_config_unlock), database: Database = Depends(get_db)
+    ) -> dict[str, Any]:
+        slug = (body.slug or "").strip()
+        changed = await store.save_experiment(database, settings, slug, body.to_input(), f"api:{user}", create=True)
+        await load_config(database, fresh=True)
+        return {"ok": True, "slug": slug, "changed": changed}
+
+    @app.put("/api/config/experiments/{slug}", dependencies=[Depends(require_csrf)])
+    async def update_experiment(
+        slug: str, body: ExperimentBody, user: str = Depends(require_config_unlock), database: Database = Depends(get_db)
+    ) -> dict[str, Any]:
+        changed = await store.save_experiment(database, settings, slug, body.to_input(), f"api:{user}")
+        await load_config(database, fresh=True)
+        return {"ok": True, "changed": changed}
 
     @app.exception_handler(ValueError)
     async def value_error_handler(_: Request, exc: ValueError) -> JSONResponse:

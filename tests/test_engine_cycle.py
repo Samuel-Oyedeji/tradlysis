@@ -271,3 +271,43 @@ async def test_kill_switch_of_one_experiment_leaves_the_other_trading(db, monkey
     summaries = await engine.run_cycle(candle_time)
     assert "KILL_SWITCH" in summaries["pullback-a"].rejections
     assert summaries["pullback-b"].order_status == "FILLED"
+
+
+async def test_engine_restarts_when_the_config_changes(db, monkeypatch):
+    import asyncio
+
+    from app import engine as engine_mod
+    from app.config import store
+
+    monkeypatch.setattr(engine_mod, "CONFIG_POLL_SECONDS", 0.01)
+    broker = FakeBroker()
+    engine = await make_engine(db, broker, llm_client(BUY, []))
+    stop = asyncio.Event()
+    watcher = asyncio.create_task(engine._config_watcher(stop))
+    await asyncio.sleep(0.05)
+    assert not stop.is_set(), "nothing changed yet"
+    await store.save_global(db, engine.settings, {"telegram_chat_id": "1"}, "test")
+    await asyncio.wait_for(watcher, 2)
+    assert stop.is_set() and engine.restart_requested
+
+
+async def test_waiting_engine_publishes_why(db, monkeypatch):
+    import asyncio
+
+    from app import engine as engine_mod
+    from app.config import store
+    from app.db.control import get_control
+    from app.db.enums import ControlKey
+
+    monkeypatch.setattr(engine_mod, "CONFIG_POLL_SECONDS", 0.01)
+    base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False), capital_demo_api_key="")
+    config = await store.load_configuration(db, base)
+    reason = engine_mod.startup_problem(store.single_experiment(config.settings))
+    assert "CAPITAL_DEMO_API_KEY" in reason
+    task = asyncio.create_task(engine_mod.wait_for_config_change(base, config.version, reason, asyncio.Event()))
+    await asyncio.sleep(0.1)
+    async with db.session() as s:
+        hb = await get_control(s, ControlKey.ENGINE_HEARTBEAT)
+    assert hb["state"] == "WAITING" and "CAPITAL_DEMO_API_KEY" in hb["reason"]
+    await store.save_global(db, base, {"capital_demo_api_key": "k"}, "test")
+    await asyncio.wait_for(task, 2)
