@@ -7,7 +7,7 @@ import asyncio
 from app.alerts.notifier import Notifier
 from app.decision.service import DecisionOutcome, prefilter_wait
 from app.engine import _setup_message
-from app.market_data.service import MarketDataService
+from app.market_data.service import PriceStream
 from app.market_data.state import MarketState
 from app.reconciliation import reconciler as reconciliation
 from app.reconciliation.reconciler import Reconciler
@@ -70,7 +70,8 @@ class FailingStream:
 
 async def test_stream_disconnects_do_not_reach_telegram(monkeypatch):
     n, tg = notifier()
-    svc = MarketDataService(make_settings(), FailingStream(3), None, n, MarketState("EUR_USD", 0.0001))  # type: ignore[arg-type]
+    state = MarketState("EUR_USD", 0.0001)
+    svc = PriceStream(FailingStream(3), n, {"EUR_USD": state})  # type: ignore[arg-type]
     real_wait_for = asyncio.wait_for
     monkeypatch.setattr(asyncio, "wait_for", lambda aw, timeout: real_wait_for(aw, 0))
     stop = asyncio.Event()
@@ -79,7 +80,7 @@ async def test_stream_disconnects_do_not_reach_telegram(monkeypatch):
     stop.set()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
-    assert svc.state.reconnects == 3 and svc.state.stream_connected
+    assert state.reconnects == 3 and state.stream_connected
     assert tg.sent == []  # 3 disconnects and a reconnect: logged, not sent
 
 

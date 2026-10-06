@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Config · Tradlysis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<style>
+.lock { max-width: 420px; margin: 40px auto; }
+.lock form { display: grid; gap: 10px; }
+.sec { margin-top: 16px; }
+.grp-h { padding: 10px 16px 4px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); background: var(--panel-2); border-bottom: 1px solid var(--grid); }
+details.exp { border-bottom: 1px solid var(--line); }
+details.exp:last-of-type { border-bottom: 0; }
+details.exp > summary { margin: 0; padding: 14px 16px; font-size: 14px; color: var(--ink); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+details.exp > summary .pair { font: 600 12px var(--mono); color: var(--ink-3); }
+.reset { font: 600 12px var(--sans); background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; white-space: nowrap; }
+.err { color: var(--bad-ink); }
+.ok { color: var(--good-ink); }
+.changes td { font-size: 12px; }
+.changes .v { font-family: var(--mono); overflow-wrap: anywhere; max-width: 260px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="side" id="side"></aside>
+  <div>
+    <header class="topbar" id="topbar"></header>
+    <main class="main">
+      <div class="page-h"><h1>Config</h1><span><button class="btn" id="btn-lock" type="button" hidden>Lock</button></span></div>
+
+      <section class="panel lock" id="locked" hidden>
+        <div class="panel-h"><h2>Config page locked</h2></div>
+        <div class="panel-b">
+          <p class="dim" style="margin-top:0">Broker credentials, API keys and risk limits live here. Enter the config password
+            (<span class="mono">CONFIG_PASSWORD</span> on the server) to unlock this page for 15 minutes.</p>
+          <form id="unlock-form">
+            <input class="inp" type="password" id="password" autocomplete="current-password" aria-label="Config password" required>
+            <button class="btn primary" type="submit">Unlock</button>
+            <div class="err" id="unlock-msg" role="alert"></div>
+          </form>
+        </div>
+      </section>
+
+      <div id="unlocked" hidden>
+        <div class="note" id="intro"></div>
+
+        <section class="panel sec">
+          <div class="panel-h"><h2>Experiments</h2><span class="aside">each with its own capital and risk limits</span></div>
+          <div id="experiments"></div>
+        </section>
+
+        <section class="panel sec">
+          <div class="panel-h"><h2>New experiment</h2></div>
+          <div id="new-exp"></div>
+        </section>
+
+        <section class="panel sec">
+          <div class="panel-h"><h2>Global settings</h2><span class="aside">all experiments</span></div>
+          <form id="global-form"></form>
+        </section>
+
+        <section class="panel sec">
+          <div class="panel-h"><h2>Recent changes</h2></div>
+          <div class="panel-b flush scroll-x" id="changes"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/assets/app.js"></script>
+<script>
+const {esc, short, pair} = T;
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = "tradlysis.configToken";
+const token = {
+  get() { try { return sessionStorage.getItem(TOKEN_KEY); } catch (e) { return null; } },
+  set(v) { try { v ? sessionStorage.setItem(TOKEN_KEY, v) : sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* private mode */ } },
+};
+let cfg = null;
+T.renderShell("config");
+T.refreshStatus();
+
+async function capi(path, opts = {}) {
+  try {
+    return await T.api(path, {...opts, headers: {"X-Config-Token": token.get() || "", ...(opts.headers || {})}});
+  } catch (e) {
+    if (e.status === 401 && path !== "/api/config/unlock") { token.set(null); showLocked(); }
+    throw e;
+  }
+}
+
+function showLocked(msg) {
+  $("locked").hidden = false; $("unlocked").hidden = true; $("btn-lock").hidden = true;
+  $("unlock-msg").textContent = msg || "";
+  $("password").focus();
+}
+
+$("unlock-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  $("unlock-msg").textContent = "";
+  try {
+    const r = await capi("/api/config/unlock", {method: "POST", body: JSON.stringify({password: $("password").value})});
+    token.set(r.token); $("password").value = "";
+    await load();
+  } catch (e) {
+    $("unlock-msg").textContent = e.status === 401 ? "Wrong password." : String(e.detail || e.message);
+  }
+};
+$("btn-lock").onclick = async () => { try { await capi("/api/config/lock", {method: "POST"}); } catch (e) { /* already locked */ } token.set(null); showLocked(); };
+
+// ------------------------------------------------------------------ fields
+
+let uid = 0;
+function input(f, value) {
+  const id = `f${++uid}`;
+  if (f.kind === "bool") {
+    return {id, html: `<label class="chk"><input type="checkbox" id="${id}" ${value === "true" ? "checked" : ""}> ${value === "true" ? "on" : "off"}</label>`};
+  }
+  if (f.kind === "choice") {
+    return {id, html: `<select class="inp" id="${id}">${f.choices.map(c => `<option ${c === value ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`};
+  }
+  if (f.secret) {
+    return {id, html: `<input class="inp" type="password" id="${id}" autocomplete="new-password" placeholder="${f.is_set ? "saved · type to replace" : "not set"}">`};
+  }
+  return {id, html: `<input class="inp" id="${id}" value="${esc(value ?? "")}" ${f.kind === "number" ? 'inputmode="decimal"' : ""} spellcheck="false">`};
+}
+
+function read(id, f) {
+  const el = $(id);
+  if (f.kind === "bool") return el.checked ? "true" : "false";
+  return el.value.trim();
+}
+
+const SOURCE = {app: "saved here", env: "from .env", default: "default", global: "global default"};
+
+// Renders fields grouped; returns a function giving {key: value|null} for what changed.
+function fieldsBlock(fields, {resettable}) {
+  const groups = {};
+  fields.forEach(f => (groups[f.group] ||= []).push(f));
+  const entries = [];
+  let html = "";
+  for (const [group, list] of Object.entries(groups)) {
+    html += `<div class="grp-h">${esc(group)}</div>`;
+    for (const f of list) {
+      const inp = input(f, f.value);
+      const canReset = resettable && f.source === "app";
+      entries.push({f, id: inp.id, resetId: canReset ? `${inp.id}-r` : null});
+      html += `<div class="field"><label for="${inp.id}">${esc(f.label)}<span class="env">${esc(f.env)}</span></label>
+        <div><div class="inp-row">${inp.html}${canReset ? `<button type="button" class="reset" id="${inp.id}-r" title="${resettable === "experiment" ? "Use the global value" : "Use the .env or default value"}">Reset</button>` : ""}</div>
+        <div class="help">${esc(f.help)}${f.help ? " " : ""}<span class="src">${esc(SOURCE[f.source] || f.source)}</span></div></div></div>`;
+    }
+  }
+  const reset = new Set();
+  const bind = () => entries.forEach(e => {
+    if (e.resetId) $(e.resetId).onclick = () => { reset.add(e.f.key); $(e.resetId).textContent = "Will reset"; $(e.resetId).disabled = true; };
+    const el = $(e.id);
+    el.oninput = el.onchange = () => el.closest(".field").classList.add("changed");
+  });
+  const changes = () => {
+    const out = {};
+    for (const e of entries) {
+      if (reset.has(e.f.key)) { out[e.f.key] = null; continue; }
+      const v = read(e.id, e.f);
+      if (e.f.secret) { if (v) out[e.f.key] = v; continue; }
+      if (v !== (e.f.value ?? "")) out[e.f.key] = v;
+    }
+    return out;
+  };
+  return {html, bind, changes};
+}
+
+function saveBar(id, label) {
+  return `<div class="savebar"><span class="msg" id="${id}-msg" role="status"></span><button class="btn primary" type="submit" id="${id}-btn">${esc(label)}</button></div>`;
+}
+
+async function submit(id, fn) {
+  const msg = $(`${id}-msg`), btn = $(`${id}-btn`);
+  msg.className = "msg"; msg.textContent = "Saving…"; btn.disabled = true;
+  try {
+    const r = await fn();
+    if (r === null) { msg.textContent = "Nothing changed."; return; }
+    msg.className = "msg ok"; msg.textContent = r.changed && r.changed.length ? `Saved: ${r.changed.join(", ")}. The engine restarts within a few seconds to apply it.` : "Nothing changed.";
+    setTimeout(load, 1200);
+  } catch (e) {
+    msg.className = "msg err"; msg.textContent = String(e.detail || e.message);
+  } finally { btn.disabled = false; }
+}
+
+// ------------------------------------------------------------------ experiments
+
+function experimentForm(e) {
+  const key = `exp-${e.slug}`;
+  const block = fieldsBlock(e.fields, {resettable: "experiment"});
+  const strategies = Object.entries(cfg.strategies).map(([k, v]) => `<option value="${esc(k)}" ${k === e.strategy ? "selected" : ""}>${esc(v)}</option>`).join("");
+  const html = `<details class="exp" ${cfg.experiments.length === 1 ? "open" : ""}>
+    <summary><b>${esc(e.name)}</b><span class="pair">${esc(pair(e.instrument))}</span><span class="badge ${e.enabled ? "on" : "off"}">${e.enabled ? "enabled" : "off"}</span><span class="muted mono" style="font-size:12px">${esc(e.slug)}</span></summary>
+    <form id="${key}">
+      <div class="grp-h">Experiment</div>
+      <div class="field"><label for="${key}-enabled">Running</label><div><label class="chk"><input type="checkbox" id="${key}-enabled" ${e.enabled ? "checked" : ""}> the engine trades this experiment</label></div></div>
+      <div class="field"><label for="${key}-name">Name</label><div><input class="inp" id="${key}-name" value="${esc(e.name)}" maxlength="80"></div></div>
+      <div class="field"><label for="${key}-desc">Description</label><div><input class="inp" id="${key}-desc" value="${esc(e.description || "")}" maxlength="500" style="font-family:var(--sans)"></div></div>
+      <div class="field"><label for="${key}-inst">Instrument</label><div><input class="inp" id="${key}-inst" value="${esc(e.instrument)}" maxlength="7"><div class="help">Fixed once the experiment has made a decision; create a new experiment for another pair.</div></div></div>
+      <div class="field"><label for="${key}-strategy">Strategy</label><div><select class="inp" id="${key}-strategy">${strategies}</select><div class="help">Fixed once the experiment has made a decision. Its own settings appear under Strategy after saving.</div></div></div>
+      <div class="field"><label for="${key}-capital">Capital<span class="env">account currency</span></label><div><input class="inp" id="${key}-capital" value="${esc(e.capital ?? "")}" inputmode="decimal" placeholder="empty = the account balance when it starts"><div class="help">Its own starting capital. Equity = capital + the P/L of its trades; position size and loss limits use it.</div></div></div>
+      ${block.html}
+      ${saveBar(key, "Save experiment")}
+    </form></details>`;
+  const bind = () => {
+    block.bind();
+    $(key).onsubmit = (ev) => {
+      ev.preventDefault();
+      submit(key, async () => {
+        const body = {settings: block.changes()};
+        const val = (s) => $(`${key}-${s}`).value.trim();
+        if ($(`${key}-enabled`).checked !== e.enabled) body.enabled = $(`${key}-enabled`).checked;
+        if (val("name") !== e.name) body.name = val("name");
+        if (val("desc") !== (e.description || "")) body.description = val("desc");
+        if (val("inst").toUpperCase() !== e.instrument) body.instrument = val("inst");
+        if (val("strategy") !== e.strategy) body.strategy = val("strategy");
+        if (val("capital") !== (e.capital ?? "")) body.capital = val("capital");
+        if (Object.keys(body).length === 1 && !Object.keys(body.settings).length) return null;
+        return capi(`/api/config/experiments/${encodeURIComponent(e.slug)}`, {method: "PUT", body: JSON.stringify(body)});
+      });
+    };
+  };
+  return {html, bind};
+}
+
+function newExperimentForm() {
+  const options = cfg.experiments.map(e => `<option value="${esc(e.slug)}">${esc(e.name)}</option>`).join("");
+  $("new-exp").innerHTML = `<form id="new">
+    <div class="field"><label for="new-slug">Id<span class="env">permanent</span></label><div><input class="inp" id="new-slug" placeholder="gbpusd-pullback" maxlength="63" required pattern="[a-z0-9][a-z0-9-]{1,62}"><div class="help">Lower-case letters, digits and "-". Stored with every decision and trade; it can't change later.</div></div></div>
+    <div class="field"><label for="new-name">Name</label><div><input class="inp" id="new-name" placeholder="GBP/USD trend pullback" maxlength="80" required style="font-family:var(--sans)"></div></div>
+    <div class="field"><label for="new-strategy">Strategy</label><div><select class="inp" id="new-strategy">${Object.entries(cfg.strategies).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div></div>
+    <div class="field"><label for="new-inst">Instrument</label><div><input class="inp" id="new-inst" placeholder="GBP_USD" maxlength="7" required><div class="help">A Capital.com currency pair. Add the central bank's RSS feed under Global settings → News if it is not there yet.</div></div></div>
+    <div class="field"><label for="new-capital">Capital</label><div><input class="inp" id="new-capital" inputmode="decimal" placeholder="empty = the account balance when it starts"></div></div>
+    <div class="field"><label for="new-copy">Copy parameters from</label><div><select class="inp" id="new-copy"><option value="">nothing (global defaults)</option>${options}</select><div class="help">Risk limits, strategy and model settings. Change them after creating it. New experiments start switched off.</div></div></div>
+    ${saveBar("new", "Create experiment")}
+  </form>`;
+  $("new").onsubmit = (ev) => {
+    ev.preventDefault();
+    submit("new", async () => {
+      const src = cfg.experiments.find(e => e.slug === $("new-copy").value);
+      const strategy = $("new-strategy").value;
+      const settings = {};
+      // Copy the source's saved parameters that apply to the new experiment's strategy.
+      if (src) src.fields.filter(f => f.source === "app" && (!f.strategies.length || f.strategies.includes(strategy)))
+        .forEach(f => { settings[f.key] = f.value; });
+      const r = await capi("/api/config/experiments", {method: "POST", body: JSON.stringify({
+        slug: $("new-slug").value.trim(), name: $("new-name").value.trim(), instrument: $("new-inst").value.trim(),
+        capital: $("new-capital").value.trim(), strategy, settings,
+      })});
+      return {changed: [`created ${r.slug} (switched off)`]};
+    });
+  };
+}
+
+// ------------------------------------------------------------------ page
+
+async function load() {
+  try { cfg = await capi("/api/config"); } catch (e) { if (e.status !== 401) showLocked(String(e.detail || e.message)); return; }
+  $("locked").hidden = true; $("unlocked").hidden = false; $("btn-lock").hidden = false;
+  const overridden = cfg.env_overridden.length
+    ? `<p style="margin:8px 0 0">Also set in <span class="mono">.env</span>, where the value is now ignored: <span class="mono">${cfg.env_overridden.map(esc).join(", ")}</span>. You can delete them from <span class="mono">.env</span>.</p>` : "";
+  $("intro").innerHTML = `Saved settings take effect within a few seconds: the engine finishes any decision in progress and restarts with them.
+    Mode: <b>${cfg.mode === "demo" ? "demo" : "LIVE"}</b> (set on the server). Only these stay in the server's <span class="mono">.env</span>:
+    <span class="mono">${cfg.env_only.map(esc).join(", ")}</span>.${overridden}`;
+
+  uid = 0;
+  const forms = cfg.experiments.map(experimentForm);
+  $("experiments").innerHTML = forms.length ? forms.map(f => f.html).join("") : `<div class="empty">No experiments yet.</div>`;
+  forms.forEach(f => f.bind());
+  newExperimentForm();
+
+  const g = fieldsBlock(cfg.global, {resettable: "global"});
+  $("global-form").innerHTML = g.html + saveBar("global", "Save global settings");
+  g.bind();
+  $("global-form").onsubmit = (ev) => {
+    ev.preventDefault();
+    submit("global", async () => {
+      const values = g.changes();
+      if (!Object.keys(values).length) return null;
+      return capi("/api/config", {method: "PUT", body: JSON.stringify({values})});
+    });
+  };
+
+  const rows = cfg.changes.map(c => `<tr><td>${esc(short(c.at))}</td><td>${esc(c.scope)}</td><td class="mono">${esc(c.key)}</td><td class="v">${esc(c.old ?? "–")} → ${esc(c.new ?? "(removed)")}</td><td>${esc(c.by)}</td></tr>`).join("");
+  $("changes").innerHTML = rows ? `<table class="t changes"><thead><tr><th>When</th><th>Scope</th><th>Setting</th><th>Change</th><th>By</th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No changes yet.</div>`;
+}
+
+if (token.get()) load(); else showLocked();
+</script>
+</body>
+</html>

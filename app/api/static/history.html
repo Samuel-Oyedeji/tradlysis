@@ -235,7 +235,7 @@ async function renderDetail(id) {
   $("detail").innerHTML = `
     <div class="dh">
       <div>${isDesktop() ? "" : `<a href="/history" id="back">← All history</a>`}
-        <h2>${esc(it.direction || "")} EUR/USD</h2><div class="sub">${esc(dt(it.time))}${it.regime ? ` · ${esc(pretty(it.regime))}` : ""}${it.news_risk ? ` · news ${esc(it.news_risk)}` : ""}</div></div>
+        <h2>${esc(it.direction || "")} ${esc(T.pair(it.instrument))}</h2><div class="sub">${esc(dt(it.time))}${it.regime ? ` · ${esc(pretty(it.regime))}` : ""}${it.news_risk ? ` · news ${esc(it.news_risk)}` : ""}</div></div>
       <div class="res"><span class="badge ${cls}">${icon} ${esc(it.label)}</span>${hypoLine(it.hypothetical)}</div>
     </div>
     <div class="panel facts">

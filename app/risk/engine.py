@@ -7,6 +7,11 @@ Final authority over whether an order may be submitted. The engine:
 
 ``evaluate`` is a pure function over a :class:`RiskContext`; gathering the context
 (broker state, DB flags, prices) is done by the orchestrator.
+
+Every experiment has its own risk pool: ``nav`` and ``balance`` are the *experiment's* equity
+(its capital plus the P/L of its own trades) and balance, and the limits are its own settings.
+Only margin and account health are measured on the shared broker account, because those are
+physical limits of the one account.
 """
 
 from __future__ import annotations
@@ -55,7 +60,7 @@ class RiskContext:
     tradeable: bool
     instrument: InstrumentInfo
 
-    # account (from broker, via reconciliation)
+    # experiment equity (capital + its P/L) and the shared account's margin (from reconciliation)
     account_currency: str
     nav: Decimal | None
     balance: Decimal | None
@@ -66,8 +71,11 @@ class RiskContext:
     quote_home_rate: float | None  # account-currency value of 1 unit of quote currency (loss side)
     base_home_rate: float | None  # account-currency value of 1 unit of base currency (position value)
 
-    # exposure
+    # exposure: this experiment's open trades, and positions of others that block an entry on the
+    # same instrument (all of them on a netting account; only unattributed ones with hedging on)
     open_trades: list[OpenTradeRisk] = field(default_factory=list)
+    other_positions_on_instrument: int = 0
+    account_nav: Decimal | None = None  # the broker account's equity (health check only)
     unresolved_orders: int = 0
     last_entry_same_direction_at: datetime | None = None
 
@@ -130,10 +138,15 @@ def evaluate(ctx: RiskContext, settings: Settings) -> RiskResult:
     healthy = (
         ctx.nav is not None
         and ctx.nav > 0
+        and (ctx.account_nav is None or ctx.account_nav > 0)
         and age is not None
         and age <= settings.max_account_state_age_seconds
     )
-    add("ACCOUNT_HEALTH", healthy, f"nav={ctx.nav} state_age_s={None if age is None else round(age)}")
+    add(
+        "ACCOUNT_HEALTH",
+        healthy,
+        f"equity={ctx.nav} account={ctx.account_nav} state_age_s={None if age is None else round(age)}",
+    )
 
     if ctx.nav is not None and ctx.day_start_nav:
         daily_pct = float((ctx.nav - ctx.day_start_nav) / ctx.day_start_nav * 100)
@@ -192,8 +205,12 @@ def evaluate(ctx: RiskContext, settings: Settings) -> RiskResult:
     same_inst = [t for t in ctx.open_trades if t.instrument == inst.name]
     add(
         "EXISTING_POSITION",
-        len(same_inst) == 0 and len(ctx.open_trades) < settings.max_open_trades,
-        f"{len(ctx.open_trades)} open trade(s), {len(same_inst)} on {inst.name}",
+        len(same_inst) == 0
+        and len(ctx.open_trades) < settings.max_open_trades
+        and ctx.other_positions_on_instrument == 0,
+        f"{len(ctx.open_trades)} open trade(s), {len(same_inst)} on {inst.name}"
+        + (f"; {ctx.other_positions_on_instrument} other position(s) on {inst.name} block it"
+           if ctx.other_positions_on_instrument else ""),
     )
     add("NO_UNRESOLVED_ORDERS", ctx.unresolved_orders == 0, f"{ctx.unresolved_orders} unresolved")
     if ctx.last_entry_same_direction_at is not None:

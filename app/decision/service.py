@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from app.db.enums import DecisionSource
 from app.decision.openrouter import OpenRouterClient, uses_decisions_api
-from app.decision.prompts import DECISION_CHECKS, PROMPT_VERSION, build_decision_questions, build_messages
+from app.decision.prompts import TREND_PULLBACK, DecisionPrompt
 from app.decision.schema import DECISION_SCHEMA, Action, DecisionOut
 
 
@@ -54,12 +54,20 @@ def prefilter_wait(reason_codes: list[str]) -> DecisionOutcome:
 
 
 class DecisionService:
-    def __init__(self, client: OpenRouterClient, model: str, max_tokens: int, temperature: float) -> None:
+    def __init__(
+        self,
+        client: OpenRouterClient,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        prompt: DecisionPrompt = TREND_PULLBACK,
+    ) -> None:
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.prompt_version = PROMPT_VERSION
+        self.prompt = prompt  # the strategy's setup, questions and wording
+        self.prompt_version = prompt.version
 
     async def decide(self, snapshot: dict[str, Any]) -> DecisionOutcome:
         if uses_decisions_api(self.model):
@@ -67,7 +75,7 @@ class DecisionService:
         return await self._decide_with_chat(snapshot)
 
     async def _decide_with_decisions_api(self, snapshot: dict[str, Any]) -> DecisionOutcome:
-        questions = build_decision_questions()
+        questions = self.prompt.questions()
         result = await self.client.decisions(model=self.model, state=snapshot, questions=questions)
         common = dict(
             raw_response={"api": "decisions", "response": result.raw_response, "error": result.error},
@@ -80,7 +88,7 @@ class DecisionService:
         if not result.ok:
             return _error_wait("LLM_ERROR", result.error, common)
         try:
-            out = DecisionOut.model_validate(parse_decision_answers(result.answers, snapshot))
+            out = DecisionOut.model_validate(parse_decision_answers(result.answers, snapshot, self.prompt))
         except (ValidationError, ValueError) as exc:
             return _error_wait("SCHEMA_INVALID", str(exc)[:1000], common)
         return DecisionOutcome(
@@ -95,7 +103,7 @@ class DecisionService:
         )
 
     async def _decide_with_chat(self, snapshot: dict[str, Any]) -> DecisionOutcome:
-        messages = build_messages(snapshot)
+        messages = self.prompt.messages(snapshot)
         result = await self.client.structured_completion(
             model=self.model,
             messages=messages,
@@ -130,7 +138,9 @@ class DecisionService:
             )
         try:
             out = DecisionOut.model_validate(result.parsed)
-        except ValidationError as exc:
+            if out.setup not in (self.prompt.setup, "NONE"):
+                raise ValueError(f"setup {out.setup} is not this experiment's setup {self.prompt.setup}")
+        except (ValidationError, ValueError) as exc:
             return DecisionOutcome(
                 source=DecisionSource.ERROR,
                 decision=Action.WAIT,
@@ -166,7 +176,9 @@ def _error_wait(code: str, error: str | None, common: dict[str, Any]) -> Decisio
     )
 
 
-def parse_decision_answers(answers: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+def parse_decision_answers(
+    answers: dict[str, Any], snapshot: dict[str, Any], prompt: DecisionPrompt = TREND_PULLBACK
+) -> dict[str, Any]:
     """Map Decisions API answers onto the decision schema (validated afterwards by ``DecisionOut``)."""
     answer = answers.get("decision")
     if not isinstance(answer, dict) or answer.get("type") != "choice":
@@ -181,7 +193,7 @@ def parse_decision_answers(answers: dict[str, Any], snapshot: dict[str, Any]) ->
     direction = choice if choice in (Action.BUY, Action.SELL) else plan.get("direction")
     slot = 0 if direction == Action.BUY else 1 if direction == Action.SELL else 2
     codes: list[str] = []
-    for key, (_question, yes_codes, no_code) in DECISION_CHECKS.items():
+    for key, (_question, yes_codes, no_code) in prompt.checks.items():
         check = answers.get(key)
         if not isinstance(check, dict) or check.get("noul") is None:
             continue
@@ -193,7 +205,7 @@ def parse_decision_answers(answers: dict[str, Any], snapshot: dict[str, Any]) ->
     rationale = " · ".join(f"P({k})={float(v):.2f}" for k, v in ranked) or f"{choice} ({float(confidence):.2f})"
     return {
         "decision": choice,
-        "setup": "TREND_PULLBACK" if choice in (Action.BUY, Action.SELL) else "NONE",
+        "setup": prompt.setup if choice in (Action.BUY, Action.SELL) else "NONE",
         "confidence": float(confidence),
         "reason_codes": codes or ["OTHER"],
         "rationale": rationale[:400],

@@ -8,26 +8,30 @@ Every cycle:
      CLOSED, compute R and P/L.
   4. New activity and transaction history -> ``broker_transactions`` (audit trail).
   5. Orders stuck in PENDING_SUBMIT/SUBMITTED/UNKNOWN -> resolved from broker state.
-  6. Peak NAV, start-of-day NAV and the daily-loss / max-drawdown circuit breakers.
+  6. Each experiment's equity (its capital plus the P/L of its own trades), its peak and
+     start-of-day equity and its daily-loss / max-drawdown circuit breakers.
+
+All experiments trade on one broker account; this reconciles that account once for all of them.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from app.alerts.notifier import Notifier
 from app.broker.capital import CapitalClient, CapitalDataError
 from app.broker.types import AccountState, BrokerPosition
 from app.config.settings import Settings
-from app.db.control import get_control, set_control
+from app.db.control import get_control, scoped, set_control
 from app.db.enums import ControlKey, Direction, TradeState
 from app.db.models import AccountSnapshot, BrokerTransaction, Trade
 from app.db.session import Database
@@ -44,6 +48,46 @@ HISTORY_OVERLAP = timedelta(minutes=10)
 # Telegram hears about failing reconciliation only once it has failed this many passes in a
 # row (about a minute at the default 15 s interval); single failures are logged.
 RECONCILE_ALERT_AFTER_FAILURES = 4
+# How often the account's hedging-mode preference is re-read.
+PREFERENCES_REFRESH = timedelta(minutes=5)
+
+
+@dataclass
+class ExperimentBook:
+    """What the reconciler needs to know about one experiment."""
+
+    slug: str
+    settings: Settings
+    capital: Decimal | None = None  # None: set from the account balance on the first valid reading
+    notifier: Notifier | None = None
+
+
+@dataclass
+class ExperimentEquity:
+    capital: Decimal
+    realized_pl: Decimal
+    unrealized_pl: Decimal
+    open_trades: int
+    at: datetime
+
+    @property
+    def balance(self) -> Decimal:
+        return self.capital + self.realized_pl
+
+    @property
+    def equity(self) -> Decimal:
+        return self.capital + self.realized_pl + self.unrealized_pl
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capital": str(self.capital),
+            "realized_pl": str(self.realized_pl),
+            "unrealized_pl": str(self.unrealized_pl),
+            "balance": str(self.balance),
+            "equity": str(self.equity),
+            "open_trades": self.open_trades,
+            "at": self.at.isoformat(),
+        }
 
 
 @dataclass
@@ -89,12 +133,25 @@ class Reconciler:
         db: Database,
         notifier: Notifier,
         executor: OrderExecutor,
+        books: dict[str, ExperimentBook] | None = None,
+        on_capital: Callable[[str, Decimal], Awaitable[None]] | None = None,
     ) -> None:
         self.settings = settings
         self.client = client
         self.db = db
         self.notifier = notifier
         self.executor = executor
+        if books is None:
+            books = {settings.experiment_name: ExperimentBook(settings.experiment_name, settings)}
+        for book in books.values():
+            if book.notifier is None:
+                book.notifier = notifier.for_experiment(book.slug, book.slug)
+        self.books = books
+        self.on_capital = on_capital
+        self.equity: dict[str, ExperimentEquity] = {}
+        self.hedging_mode: bool | None = None
+        self._preferences_at: datetime | None = None
+        self._lock = asyncio.Lock()
         self.account: AccountView | None = None
         self.broker_open_trades: list[BrokerPosition] = []
         self.open_trades_fetched_at: datetime | None = None
@@ -114,12 +171,18 @@ class Reconciler:
                 pass
 
     async def reconcile_once(self) -> bool:
+        async with self._lock:  # the loop and the decision cycles both call this
+            return await self._reconcile_once()
+
+    async def _reconcile_once(self) -> bool:
         try:
             positions = await self.client.get_positions()
             await self._sync_account(positions)
             await self._sync_trades(positions)
             await self._sync_history()
             await self.executor.resolve_unresolved_orders(min_age_seconds=30)
+            await self._refresh_preferences()
+            await self._update_equity()
             await self._update_breakers()
         except Exception as exc:
             self._failures += 1
@@ -240,7 +303,7 @@ class Reconciler:
                     broker_trade_id=p.deal_id,
                     order_id=order.id if order else None,
                     client_trade_id=order.client_order_id if order else None,
-                    experiment=self.settings.experiment_name if order else None,
+                    experiment=await self.executor.order_experiment(order.id) if order else None,
                     instrument=p.instrument,
                     direction=p.direction,
                     initial_units=p.units,
@@ -301,7 +364,7 @@ class Reconciler:
             row.current_units = 0
             row.r_multiple = r_mult
             row.raw = {**(row.raw or {}), "closed": activity, "realized_pl_source": "computed_from_prices"}
-        await self.notifier.info(
+        await self.executor._for(trade.experiment).info(
             COMPONENT,
             "TRADE_CLOSED",
             f"{trade.direction} {trade.instrument} closed ({reason}) @ {close_price}: "
@@ -359,29 +422,83 @@ class Reconciler:
         async with self.db.session() as s:
             await set_control(s, ControlKey.LAST_TRANSACTION_ID, {"value": max(newest, since).isoformat()}, COMPONENT)
 
-    # ------------------------------------------------------------------ breakers
+    # ------------------------------------------------------------------ experiments
+
+    async def _refresh_preferences(self) -> None:
+        now = utcnow()
+        if self._preferences_at is not None and now - self._preferences_at < PREFERENCES_REFRESH:
+            return
+        try:
+            self.hedging_mode = bool((await self.client.get_preferences()).get("hedgingMode"))
+            self._preferences_at = now
+        except Exception as exc:
+            log.warning("account preferences fetch failed: %s", exc)
+
+    async def _update_equity(self) -> None:
+        """Each experiment's equity: its capital plus the realized and open P/L of its own trades."""
+        if self.account is None or not self._account_reading_ok:
+            return
+        closed, open_ = str(TradeState.CLOSED), str(TradeState.OPEN)
+        async with self.db.session() as s:
+            rows = (
+                await s.execute(
+                    select(
+                        Trade.experiment,
+                        func.coalesce(func.sum(Trade.realized_pl).filter(Trade.state == closed), 0),
+                        func.coalesce(func.sum(Trade.unrealized_pl).filter(Trade.state == open_), 0),
+                        func.count().filter(Trade.state == open_),
+                    )
+                    .where(Trade.experiment.in_(list(self.books)))
+                    .group_by(Trade.experiment)
+                )
+            ).all()
+        pl = {slug: (Decimal(str(r)), Decimal(str(u)), int(n)) for slug, r, u, n in rows}
+        now = utcnow()
+        for slug, book in self.books.items():
+            realized, unrealized, n_open = pl.get(slug, (Decimal(0), Decimal(0), 0))
+            if book.capital is None:
+                # Start from the account's cash balance, net of what this experiment already made,
+                # so an experiment that ran before capital existed keeps its history.
+                book.capital = self.account.balance - realized
+                if self.on_capital is not None:
+                    await self.on_capital(slug, book.capital)
+                await (book.notifier or self.notifier).info(
+                    COMPONENT, "CAPITAL_SET",
+                    f"{slug}: starting capital set to {book.capital:.2f} {self.account.currency} from the account balance",
+                )
+            self.equity[slug] = ExperimentEquity(book.capital, realized, unrealized, n_open, now)
 
     async def _update_breakers(self) -> None:
         if self.account is None or not self._account_reading_ok:
             return
-        nav = self.account.nav
-        today = trading_day(self.account.fetched_at).isoformat()
+        for slug, book in self.books.items():
+            eq = self.equity.get(slug)
+            if eq is not None:
+                await self._update_experiment_breakers(book, eq)
+
+    async def _update_experiment_breakers(self, book: ExperimentBook, eq: ExperimentEquity) -> None:
+        slug, nav = book.slug, eq.equity
+        notifier = book.notifier or self.notifier
+        today = trading_day(eq.at).isoformat()
         async with self.db.session() as s:
-            peak = await get_control(s, ControlKey.PEAK_NAV)
+            peak = await get_control(s, scoped(ControlKey.PEAK_NAV, slug))
             if peak is None or nav > Decimal(str(peak["value"])):
-                await set_control(s, ControlKey.PEAK_NAV, {"value": str(nav)}, COMPONENT)
+                await set_control(s, scoped(ControlKey.PEAK_NAV, slug), {"value": str(nav)}, COMPONENT)
                 peak_nav = nav
             else:
                 peak_nav = Decimal(str(peak["value"]))
 
-            day = await get_control(s, ControlKey.DAY_START_NAV)
+            day = await get_control(s, scoped(ControlKey.DAY_START_NAV, slug))
             if day is None or day.get("trading_day") != today:
-                await set_control(s, ControlKey.DAY_START_NAV, {"trading_day": today, "value": str(nav)}, COMPONENT)
+                await set_control(
+                    s, scoped(ControlKey.DAY_START_NAV, slug), {"trading_day": today, "value": str(nav)}, COMPONENT
+                )
                 day_nav = nav
-                daily = await get_control(s, ControlKey.DAILY_LOSS_BREAKER)
+                daily = await get_control(s, scoped(ControlKey.DAILY_LOSS_BREAKER, slug))
                 if daily and daily.get("tripped"):
                     await set_control(
-                        s, ControlKey.DAILY_LOSS_BREAKER, {"tripped": False, "trading_day": today}, COMPONENT
+                        s, scoped(ControlKey.DAILY_LOSS_BREAKER, slug), {"tripped": False, "trading_day": today},
+                        COMPONENT,
                     )
             else:
                 day_nav = Decimal(str(day["value"]))
@@ -389,31 +506,33 @@ class Reconciler:
             daily_pct = float((nav - day_nav) / day_nav * 100) if day_nav else 0.0
             dd_pct = float((peak_nav - nav) / peak_nav * 100) if peak_nav else 0.0
 
-            daily = await get_control(s, ControlKey.DAILY_LOSS_BREAKER) or {}
-            trip_daily = daily_pct <= -self.settings.max_daily_loss_pct and not daily.get("tripped")
+            daily = await get_control(s, scoped(ControlKey.DAILY_LOSS_BREAKER, slug)) or {}
+            trip_daily = daily_pct <= -book.settings.max_daily_loss_pct and not daily.get("tripped")
             if trip_daily:
                 await set_control(
                     s,
-                    ControlKey.DAILY_LOSS_BREAKER,
+                    scoped(ControlKey.DAILY_LOSS_BREAKER, slug),
                     {"tripped": True, "trading_day": today, "loss_pct": round(daily_pct, 3)},
                     COMPONENT,
                 )
-            dd = await get_control(s, ControlKey.DRAWDOWN_BREAKER) or {}
-            trip_dd = dd_pct >= self.settings.max_drawdown_pct and not dd.get("tripped")
+            dd = await get_control(s, scoped(ControlKey.DRAWDOWN_BREAKER, slug)) or {}
+            trip_dd = dd_pct >= book.settings.max_drawdown_pct and not dd.get("tripped")
             if trip_dd:
                 await set_control(
                     s,
-                    ControlKey.DRAWDOWN_BREAKER,
+                    scoped(ControlKey.DRAWDOWN_BREAKER, slug),
                     {"tripped": True, "drawdown_pct": round(dd_pct, 3), "at": utcnow().isoformat()},
                     COMPONENT,
                 )
         if trip_daily:
-            await self.notifier.critical(
-                COMPONENT, "DAILY_LOSS_BREAKER", f"Daily loss {daily_pct:.2f}% hit the limit; new trades halted until the next trading day"
+            await notifier.critical(
+                COMPONENT, "DAILY_LOSS_BREAKER",
+                f"{slug}: daily loss {daily_pct:.2f}% hit the limit; its new trades are halted until the next trading day",
             )
         if trip_dd:
-            await self.notifier.critical(
-                COMPONENT, "DRAWDOWN_BREAKER", f"Drawdown {dd_pct:.2f}% hit the limit; new trades halted until manually reset"
+            await notifier.critical(
+                COMPONENT, "DRAWDOWN_BREAKER",
+                f"{slug}: drawdown {dd_pct:.2f}% hit the limit; its new trades are halted until manually reset",
             )
 
 

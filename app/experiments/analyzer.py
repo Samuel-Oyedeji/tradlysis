@@ -1,4 +1,4 @@
-"""Experiment Analyzer: periodically summarises the live experiment. Never trades.
+"""Experiment Analyzer: periodically summarises every experiment. Never trades.
 
 Run continuously:  python -m app.experiments.analyzer
 Run once & print:  python -m app.experiments.analyzer --once
@@ -15,12 +15,14 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 
 from app.api.history import DECISION_BAR, HYPOTHETICAL_HORIZON, hypothetical_outcome, load_bars
 from app.config.settings import Settings, get_settings
+from app.config.store import import_env_once, load_configuration, single_experiment
 from app.db.bootstrap import auto_create_tables
 from app.db.enums import TradeState
 from app.db.models import (
@@ -136,6 +138,37 @@ def _cond_detail(strategy: dict[str, Any], name: str) -> str:
 
 def h1_alignment_key(t: ClosedTrade) -> str:
     return "h1_fully_aligned" if "fully aligned" in _cond_detail(t.strategy, "h1_alignment") else "h1_neutral"
+
+
+def range_height_key(t: ClosedTrade) -> str:
+    """Range breakout: how tall the broken range was, in H1 ATR."""
+    h = (t.strategy.get("context") or {}).get("range_height_atr")
+    if h is None:
+        return "unknown"
+    return "under_2_atr" if h < 2 else "2_to_4_atr" if h < 4 else "4_atr_plus"
+
+
+def htf_trend_key(t: ClosedTrade) -> str:
+    """Range breakout: the H4 trend at the break (with it, or neutral)."""
+    detail = _cond_detail(t.strategy, "htf_not_opposing")
+    for trend in ("BULLISH", "BEARISH", "NEUTRAL"):
+        if trend in detail:
+            return f"h4_{trend.lower()}"
+    return "unknown"
+
+
+def setup_conditions(closed: Sequence[ClosedTrade]) -> dict[str, Any]:
+    """Results by the conditions of the experiment's setup (an experiment runs one strategy)."""
+    pullback = [t for t in closed if t.strategy.get("setup", "TREND_PULLBACK") == "TREND_PULLBACK"]
+    breakout = [t for t in closed if t.strategy.get("setup") == "RANGE_BREAKOUT"]
+    out: dict[str, Any] = {}
+    if pullback:
+        out["h1_alignment"] = group_r(pullback, h1_alignment_key)
+        out["pullback_level"] = group_r(pullback, pullback_level_key)
+    if breakout:
+        out["range_height"] = group_r(breakout, range_height_key)
+        out["htf_trend"] = group_r(breakout, htf_trend_key)
+    return out
 
 
 def pullback_level_key(t: ClosedTrade) -> str:
@@ -285,10 +318,7 @@ def compute_metrics(
         "close_reasons": dict(Counter(t.close_reason or "UNKNOWN" for t in closed)),
         "unexpected_trades": sum(1 for t in trades if t.unexpected),
         "account_max_drawdown_pct": nav_drawdown_pct(navs),
-        "by_setup_condition": {
-            "h1_alignment": group_r(closed, h1_alignment_key),
-            "pullback_level": group_r(closed, pullback_level_key),
-        },
+        "by_setup_condition": setup_conditions(closed),
         "by_market_regime": {
             "overall": group_r(closed, lambda t: str((t.snapshot.get("market_regime") or {}).get("label", "UNKNOWN"))),
             "volatility": group_r(closed, lambda t: str(t.snapshot.get("volatility", {}).get("regime", "UNKNOWN"))),
@@ -332,7 +362,11 @@ def trade_outcomes(closed: Sequence[ClosedTrade], recent: int = 50) -> dict[str,
 # ---------------------------------------------------------------------- DB loading
 
 
-async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) -> dict[str, Any]:
+async def analyze(
+    db: Database, settings: Settings, pip_size: float = 0.0001, capital: Decimal | None = None
+) -> dict[str, Any]:
+    """Metrics for one experiment. Its drawdown in % is measured on its own equity (``capital`` plus
+    realized P/L after each closed trade); without a capital, on the broker account's NAV."""
     exp = settings.experiment_name
     async with db.session() as s:
         reqs = (await s.scalars(select(DecisionRequest).where(DecisionRequest.experiment == exp))).all()
@@ -343,7 +377,13 @@ async def analyze(db: Database, settings: Settings, pip_size: float = 0.0001) ->
         ords = (await s.scalars(select(Order).where(Order.risk_check_id.in_(rc_ids)))).all() if rc_ids else []
         trades = (await s.scalars(select(Trade).where(Trade.experiment == exp))).all()
         unexpected = (await s.scalars(select(Trade).where(Trade.unexpected.is_(True)))).all()
-        navs = (await s.scalars(select(AccountSnapshot.nav).order_by(AccountSnapshot.taken_at))).all()
+        if capital is None:
+            navs = (await s.scalars(select(AccountSnapshot.nav).order_by(AccountSnapshot.taken_at))).all()
+        else:
+            navs = [capital]
+            for t in sorted((t for t in trades if t.state == TradeState.CLOSED and t.close_time),
+                            key=lambda t: t.close_time):
+                navs.append(navs[-1] + (t.realized_pl or 0))
         close_reasons = await bot_close_reasons(s)
         now = utcnow()
         hypo = await _rr_only_hypotheticals(s, settings.instrument, reqs)
@@ -439,8 +479,8 @@ async def _rr_only_hypotheticals(s: Any, instrument: str, reqs: Sequence[Decisio
     return out
 
 
-async def run_once(db: Database, settings: Settings) -> dict[str, Any]:
-    metrics = await analyze(db, settings)
+async def run_once(db: Database, settings: Settings, capital: Decimal | None = None) -> dict[str, Any]:
+    metrics = await analyze(db, settings, capital=capital)
     period_start: datetime | None = metrics.pop("period_start")
     now = utcnow()
     async with db.session() as s:
@@ -460,26 +500,36 @@ async def run_once(db: Database, settings: Settings) -> dict[str, Any]:
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Tradlysis experiment analyzer")
     parser.add_argument("--once", action="store_true", help="run a single analysis, print it and exit")
+    parser.add_argument("--experiment", help="only this experiment (its id); default: all of them")
     args = parser.parse_args()
-    settings = get_settings()
-    setup_logging(settings.log_level)
-    db = Database(settings)
+    base = get_settings()
+    setup_logging(base.log_level)
+    db = Database(base)
     try:
-        await auto_create_tables(db, settings)
-        if args.once:
-            print(json.dumps(await run_once(db, settings), indent=2, default=str))
-            return
+        await auto_create_tables(db, base)
+        await import_env_once(db, base)
         while True:
-            try:
-                m = await run_once(db, settings)
-                log.info(
-                    "Analysis stored: %s opportunities, %s closed trades",
-                    m["opportunities"],
-                    m["closed_trades"].get("trades", 0),
-                )
-            except Exception:
-                log.exception("analysis failed")
-            await asyncio.sleep(settings.analyzer_interval_minutes * 60)
+            config = await load_configuration(db, base)
+            experiments = config.experiments or single_experiment(config.settings).experiments
+            if args.experiment:
+                experiments = [e for e in experiments if e.slug == args.experiment]
+            reports = {}
+            for e in experiments:
+                try:
+                    m = await run_once(db, e.settings, capital=e.capital)
+                    reports[e.slug] = m
+                    log.info(
+                        "Analysis stored for %s: %s opportunities, %s closed trades",
+                        e.slug,
+                        m["opportunities"],
+                        m["closed_trades"].get("trades", 0),
+                    )
+                except Exception:
+                    log.exception("analysis of %s failed", e.slug)
+            if args.once:
+                print(json.dumps(reports, indent=2, default=str))
+                return
+            await asyncio.sleep(config.settings.analyzer_interval_minutes * 60)
     finally:
         await db.dispose()
 

@@ -6,7 +6,10 @@ Guarantees:
     check can create at most one order.
   * Open-only: right before submitting, the broker's open positions are re-read and the entry is
     refused if one already exists on the instrument (on a non-hedging account an opposite order
-    would otherwise close or reduce it). The risk engine checks this too; this closes the race.
+    would otherwise close or reduce it). All experiments share one account: with hedging mode
+    off, any position on the instrument blocks every experiment trading it; with hedging mode on
+    (positions are kept apart), only the experiment's own positions and positions no experiment
+    owns block it. The risk engine checks this too; this closes the race.
   * Slippage bound: Capital.com market orders carry no price bound, so a fill worse than
     ``price_bound`` (entry +/- MAX_SLIPPAGE_PIPS) is closed immediately, which has the same
     effect as a bounded order being rejected (plus the spread).
@@ -34,7 +37,7 @@ from app.broker.types import BrokerPosition, InstrumentInfo
 from app.config.settings import Settings
 from app.db.control import is_kill_switch_active
 from app.db.enums import OPEN_ORDER_STATUSES, Direction, OrderPurpose, OrderStatus, TradeState
-from app.db.models import Order, Trade
+from app.db.models import DecisionRequest, Order, RiskCheck, Trade
 from app.db.session import Database
 from app.market_data.timeutil import parse_time, utcnow
 from app.risk.engine import RiskResult
@@ -56,56 +59,109 @@ class OrderExecutor:
         client: CapitalClient,
         db: Database,
         notifier: Notifier,
-        instrument: InstrumentInfo,
+        instruments: InstrumentInfo | dict[str, InstrumentInfo],
     ) -> None:
         self.settings = settings
         self.client = client
         self.db = db
         self.notifier = notifier
-        self.instrument = instrument
-        self._lock = asyncio.Lock()  # one submission at a time
+        if isinstance(instruments, InstrumentInfo):
+            instruments = {instruments.name: instruments}
+        self.instruments = instruments
+        # Per-experiment notifiers (set by the engine) so events name the experiment they belong to.
+        self.notifiers: dict[str, Notifier] = {}
+        self._order_experiments: dict[int, str | None] = {}
+        self._lock = asyncio.Lock()  # one submission at a time, across all experiments
 
     # ------------------------------------------------------------------ entry orders
 
-    async def execute_trade(self, risk_check_id: int, request_id: int, risk: RiskResult) -> Order:
-        """Submit an approved entry. Returns the final order row."""
+    def _inst(self, name: str) -> InstrumentInfo:
+        inst = self.instruments.get(name)
+        if inst is None:
+            raise KeyError(f"no instrument details for {name}")
+        return inst
+
+    def _for(self, experiment: str | None) -> Notifier:
+        return self.notifiers.get(experiment or "", self.notifier)
+
+    async def _notifier(self, order_id: int) -> Notifier:
+        return self._for(await self.order_experiment(order_id))
+
+    async def order_experiment(self, order_id: int) -> str | None:
+        """The experiment an entry order belongs to (through its risk check and decision request)."""
+        if order_id not in self._order_experiments:
+            async with self.db.session() as s:
+                self._order_experiments[order_id] = await s.scalar(
+                    select(DecisionRequest.experiment)
+                    .join(RiskCheck, RiskCheck.request_id == DecisionRequest.id)
+                    .join(Order, Order.risk_check_id == RiskCheck.id)
+                    .where(Order.id == order_id)
+                )
+        return self._order_experiments[order_id]
+
+    async def execute_trade(
+        self, risk_check_id: int, request_id: int, risk: RiskResult, experiment: Settings | None = None
+    ) -> Order:
+        """Submit an approved entry for an experiment (its settings). Returns the final order row."""
         if not risk.approved or risk.units is None or risk.direction is None:
             raise ValueError("execute_trade requires an approved risk result")
         assert risk.entry is not None and risk.stop_loss is not None and risk.take_profit is not None
+        exp = experiment or self.settings
+        slug = exp.experiment_name
+        notifier = self._for(slug)
 
         async with self._lock:
-            order = await self._create_order_row(risk_check_id, request_id, risk)
+            order = await self._create_order_row(risk_check_id, request_id, risk, exp)
+            self._order_experiments[order.id] = slug
             async with self.db.session() as s:
-                active, reason = await is_kill_switch_active(s)
+                active, reason = await is_kill_switch_active(s, slug)
             if active:
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason=f"KILL_SWITCH: {reason}")
-                await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", f"Kill switch active: {reason}", alert=True)
+                await notifier.warning(COMPONENT, "ORDER_BLOCKED", f"Kill switch active: {reason}", alert=True)
                 return await self._get(order.id)
-            blocked = await self._open_only_violation()
+            blocked = await self._open_only_violation(exp.instrument, slug)
             if blocked:
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason=blocked)
-                await self.notifier.warning(COMPONENT, "ORDER_BLOCKED", blocked, alert=True)
+                await notifier.warning(COMPONENT, "ORDER_BLOCKED", blocked, alert=True)
                 return await self._get(order.id)
             return await self._submit(order.id)
 
-    async def _open_only_violation(self) -> str | None:
+    async def _open_only_violation(self, instrument: str, experiment: str) -> str | None:
         try:
             positions = await self.client.get_positions()
+            on_instrument = [p for p in positions if p.instrument == instrument]
+            if not on_instrument:
+                return None
+            hedging = bool((await self.client.get_preferences()).get("hedgingMode"))
         except Exception as exc:
             return f"OPEN_ONLY: could not verify open positions: {exc}"[:500]
-        existing = [p.deal_id for p in positions if p.instrument == self.instrument.name]
-        if existing:
-            return f"OPEN_ONLY: a position is already open on {self.instrument.name} ({', '.join(existing)})"
-        return None
+        if hedging:
+            owners = await self.position_owners([p.deal_id for p in on_instrument])
+            # Positions no experiment owns (unknown or not yet recorded) block too.
+            on_instrument = [p for p in on_instrument if owners.get(p.deal_id) in (None, experiment)]
+            if not on_instrument:
+                return None
+        ids = ", ".join(p.deal_id for p in on_instrument)
+        return f"OPEN_ONLY: a position is already open on {instrument} ({ids})"
 
-    async def _create_order_row(self, risk_check_id: int, request_id: int, risk: RiskResult) -> Order:
-        inst = self.instrument
+    async def position_owners(self, deal_ids: list[str]) -> dict[str, str | None]:
+        """Experiment of each broker position we have a trade row for."""
+        if not deal_ids:
+            return {}
+        async with self.db.session() as s:
+            rows = (
+                await s.execute(select(Trade.broker_trade_id, Trade.experiment).where(Trade.broker_trade_id.in_(deal_ids)))
+            ).all()
+        return {deal_id: experiment for deal_id, experiment in rows}
+
+    async def _create_order_row(self, risk_check_id: int, request_id: int, risk: RiskResult, exp: Settings) -> Order:
+        inst = self._inst(exp.instrument)
         long = risk.direction == Direction.BUY
-        slip = self.settings.max_slippage_pips * inst.pip_size
+        slip = exp.max_slippage_pips * inst.pip_size
         price_bound = round(risk.entry + slip if long else risk.entry - slip, inst.display_precision)
         client_order_id = f"tlys-{request_id}-{uuid.uuid4().hex[:8]}"
         payload: dict[str, Any] = {
-            "epic": inst.epic or self.client.epic,
+            "epic": inst.epic or self.client.epic_for(inst.name),
             "direction": str(risk.direction),
             "size": abs(risk.units),
             "guaranteedStop": False,
@@ -142,7 +198,7 @@ class OrderExecutor:
             status, body = await self.client.open_position(order.request_payload)
         except CapitalTransportError as exc:
             await self._update(order.id, status=OrderStatus.UNKNOWN, reject_reason=str(exc)[:500])
-            await self.notifier.warning(
+            await (await self._notifier(order.id)).warning(
                 COMPONENT, "ORDER_OUTCOME_UNKNOWN", f"{order.client_order_id}: {exc}; resolving from broker state"
             )
             return await self._resolve_after_unknown(order.id)
@@ -159,7 +215,7 @@ class OrderExecutor:
             status=OrderStatus.FAILED,
             reject_reason=f"outcome unknown, no matching deal at broker; not resubmitted ({order.reject_reason})"[:500],
         )
-        await self.notifier.error(
+        await (await self._notifier(order_id)).error(
             COMPONENT, "ORDER_FAILED", f"{order.client_order_id}: no matching deal found at the broker; not resubmitted"
         )
         return await self._get(order_id)
@@ -173,11 +229,15 @@ class OrderExecutor:
         if 400 <= status < 500:
             reason = body.get("errorCode") or body.get("message") or f"HTTP {status}"
             await self._update(order_id, status=OrderStatus.REJECTED, reject_reason=str(reason)[:500], **common)
-            await self.notifier.error(COMPONENT, "ORDER_REJECTED", f"Broker rejected order: {reason}", details=body)
+            await (await self._notifier(order_id)).error(
+                COMPONENT, "ORDER_REJECTED", f"Broker rejected order: {reason}", details=body
+            )
             return await self._get(order_id)
         # 5xx or anything unexpected: outcome unknown until resolved from broker state.
         await self._update(order_id, status=OrderStatus.UNKNOWN, reject_reason=f"HTTP {status}", **common)
-        await self.notifier.error(COMPONENT, "ORDER_HTTP_ERROR", f"Order request returned HTTP {status}", details=body)
+        await (await self._notifier(order_id)).error(
+            COMPONENT, "ORDER_HTTP_ERROR", f"Order request returned HTTP {status}", details=body
+        )
         return await self._resolve_after_unknown(order_id)
 
     async def _confirm(self, order_id: int) -> Order:
@@ -195,7 +255,7 @@ class OrderExecutor:
             if attempt < CONFIRM_ATTEMPTS - 1:
                 await asyncio.sleep(CONFIRM_DELAY_SECONDS)
         # Accepted for processing but not confirmed yet; reconciliation resolves it by deal reference.
-        await self.notifier.warning(
+        await (await self._notifier(order_id)).warning(
             COMPONENT, "ORDER_UNCONFIRMED", f"{order.client_order_id}: no deal confirmation yet ({order.broker_order_id})"
         )
         return await self._get(order_id)
@@ -206,7 +266,9 @@ class OrderExecutor:
         if conf.get("dealStatus") == "REJECTED":
             reason = str(conf.get("reason") or conf.get("status") or "REJECTED")
             await self._update(order_id, status=OrderStatus.REJECTED, reject_reason=reason[:500], response_payload=payload)
-            await self.notifier.error(COMPONENT, "ORDER_REJECTED", f"Broker rejected order: {reason}", details=conf)
+            await (await self._notifier(order_id)).error(
+                COMPONENT, "ORDER_REJECTED", f"Broker rejected order: {reason}", details=conf
+            )
             return await self._get(order_id)
         deal_id = _opened_deal_id(conf)
         price = _f(conf.get("level"))
@@ -253,7 +315,7 @@ class OrderExecutor:
             await self._upsert_trade(
                 order, broker_trade_id=deal_id, units=units, price=price or 0.0, open_time=filled_at, raw=raw
             )
-        await self.notifier.info(
+        await (await self._notifier(order.id)).info(
             COMPONENT,
             "ORDER_FILLED",
             f"{order.direction} {abs(order.filled_units or order.units)} {order.instrument} @ "
@@ -267,17 +329,19 @@ class OrderExecutor:
     async def _enforce_slippage_bound(self, order: Order) -> None:
         if order.fill_price is None or order.price_bound is None or not order.broker_trade_id:
             return
-        eps = self.instrument.pip_size * 1e-3
+        pip = self._inst(order.instrument).pip_size
+        eps = pip * 1e-3
         long = order.direction == Direction.BUY
         worse = order.fill_price > order.price_bound + eps if long else order.fill_price < order.price_bound - eps
         if not worse:
             return
-        slip = abs(order.fill_price - (order.requested_price or order.fill_price)) / self.instrument.pip_size
+        slip = abs(order.fill_price - (order.requested_price or order.fill_price)) / pip
+        allowed = abs(order.price_bound - (order.requested_price or order.price_bound)) / pip
         reason = (
-            f"slippage {slip:.1f} pips exceeds MAX_SLIPPAGE_PIPS={self.settings.max_slippage_pips} "
+            f"slippage {slip:.1f} pips exceeds MAX_SLIPPAGE_PIPS={allowed:g} "
             f"(fill {order.fill_price}, bound {order.price_bound})"
         )
-        await self.notifier.error(COMPONENT, "SLIPPAGE_EXCEEDED", f"{order.client_order_id}: {reason}; closing", alert=True)
+        await (await self._notifier(order.id)).error(COMPONENT, "SLIPPAGE_EXCEEDED", f"{order.client_order_id}: {reason}; closing", alert=True)
         await self._close_position(order.broker_trade_id, order.instrument, order.filled_units or order.units, reason)
 
     # ------------------------------------------------------------------ resolution
@@ -303,7 +367,9 @@ class OrderExecutor:
         kind, data = match
         if kind == "position":
             p: BrokerPosition = data
-            await self.notifier.info(COMPONENT, "ORDER_RESOLVED", f"Resolved {order.client_order_id} as FILLED ({p.deal_id})")
+            await (await self._notifier(order.id)).info(
+                COMPONENT, "ORDER_RESOLVED", f"Resolved {order.client_order_id} as FILLED ({p.deal_id})"
+            )
             return await self._mark_filled(
                 order,
                 deal_id=p.deal_id,
@@ -322,7 +388,9 @@ class OrderExecutor:
         details = activity.get("details") or {}
         opened_at = parse_time(str(activity["dateUTC"])) if activity.get("dateUTC") else utcnow()
         size = _i(details.get("size")) or abs(order.units)
-        await self.notifier.info(COMPONENT, "ORDER_RESOLVED", f"Resolved {order.client_order_id} as FILLED from activity")
+        await (await self._notifier(order.id)).info(
+            COMPONENT, "ORDER_RESOLVED", f"Resolved {order.client_order_id} as FILLED from activity"
+        )
         return await self._mark_filled(
             order,
             deal_id=_activity_opened_deal(activity),
@@ -341,7 +409,7 @@ class OrderExecutor:
         for p in sorted(await self.client.get_positions(), key=lambda x: x.open_time):
             if p.deal_id not in known and self._position_matches(order, p, submitted):
                 return "position", p
-        activities = await self.client.get_activity(submitted - MATCH_BEFORE)
+        activities = await self.client.get_activity(submitted - MATCH_BEFORE, instrument=order.instrument)
         for a in sorted(activities, key=lambda x: str(x.get("dateUTC", ""))):
             if a.get("type") != "POSITION":
                 continue
@@ -357,7 +425,10 @@ class OrderExecutor:
         return None
 
     def _position_matches(self, order: Order, p: BrokerPosition, submitted: datetime) -> bool:
-        tol = self.instrument.pip_size / 2
+        inst = self.instruments.get(order.instrument)
+        if inst is None:
+            return False
+        tol = inst.pip_size / 2
         return (
             p.instrument == order.instrument
             and p.direction == order.direction
@@ -402,7 +473,7 @@ class OrderExecutor:
                 filled_at=p.open_time,
                 response_payload={**(order.response_payload or {}), "adopted": {"position": p.raw}},
             )
-            await self.notifier.warning(
+            await (await self._notifier(order.id)).warning(
                 COMPONENT, "ORDER_ADOPTED", f"{order.client_order_id} matched to broker position {p.deal_id}; marked FILLED",
                 alert=True,
             )
@@ -434,7 +505,7 @@ class OrderExecutor:
             resolved = await self.resolve_order(order.id)
             if resolved is None:
                 await self._update(order.id, status=OrderStatus.FAILED, reject_reason="not found at broker")
-                await self.notifier.warning(
+                await (await self._notifier(order.id)).warning(
                     COMPONENT, "ORDER_NOT_FOUND", f"{order.client_order_id} not found at the broker; marked FAILED",
                     alert=True,
                 )
@@ -455,14 +526,19 @@ class OrderExecutor:
 
     # ------------------------------------------------------------------ closing
 
-    async def flatten_all(self, reason: str) -> int:
-        """Close every open position on the account (used by the dashboard 'flatten' control)."""
+    async def flatten_all(self, reason: str, experiment: str | None = None) -> int:
+        """Close open positions (the dashboard's 'close all trades'): one experiment's, or all on the account."""
         positions = await self.client.get_positions()
+        if experiment is not None:
+            owners = await self.position_owners([p.deal_id for p in positions])
+            positions = [p for p in positions if owners.get(p.deal_id) == experiment]
         closed = 0
         for p in positions:
             if await self._close_position(p.deal_id, p.instrument, p.units, reason):
                 closed += 1
-        await self.notifier.warning(COMPONENT, "FLATTENED", f"Closed {closed}/{len(positions)} trades: {reason}", alert=True)
+        await self._for(experiment).warning(
+            COMPONENT, "FLATTENED", f"Closed {closed}/{len(positions)} trades: {reason}", alert=True
+        )
         return closed
 
     async def _close_position(self, deal_id: str, instrument: str, units: int, reason: str) -> bool:
@@ -546,7 +622,7 @@ class OrderExecutor:
                     broker_trade_id=broker_trade_id,
                     order_id=order.id,
                     client_trade_id=order.client_order_id,
-                    experiment=self.settings.experiment_name,
+                    experiment=await self.order_experiment(order.id),
                     instrument=order.instrument,
                     direction=order.direction,
                     initial_units=units,

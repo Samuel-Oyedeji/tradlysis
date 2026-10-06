@@ -1,7 +1,11 @@
 """Application configuration.
 
-All settings come from environment variables (or a local ``.env`` file). Credentials are
-never hard-coded; see ``.env.example`` for the full list.
+Only a few bootstrap values come from environment variables (or a local ``.env`` file):
+``DATABASE_URL``, the dashboard and config-page passwords and the trading mode. Everything
+else is edited on the dashboard's config page and stored in the database (``app_config`` and
+``experiments``); :mod:`app.config.store` merges both into a validated :class:`Settings`, so the
+same safety checks apply to values typed in the browser. Environment values still work as
+fallbacks for settings never saved in-app. Credentials are never hard-coded.
 
 Safety defaults:
   * ``TRADING_MODE`` defaults to ``demo`` and always talks to Capital.com's demo API host.
@@ -130,12 +134,24 @@ class Settings(BaseSettings):
     strategy_fallback_target_r: float = 2.0
     strategy_max_target_r: float = 4.0
 
+    # --- Strategy (range breakout) --------------------------------------------------------
+    breakout_range_bars: int = 20  # completed H1 bars that form the range
+    breakout_min_range_atr: float = 1.5  # range height, in H1 ATR
+    breakout_max_range_atr: float = 6.0
+    breakout_min_touches: int = 2  # visits to each edge
+    breakout_buffer_atr: float = 0.1  # M15 close beyond the edge, in M15 ATR
+    breakout_min_body_atr: float = 0.5  # body of the breaking M15 candle, in M15 ATR
+    breakout_fresh_bars: int = 4  # earlier M15 candles that must not have closed beyond the edge
+    breakout_stop_range_frac: float = 0.3  # stop this fraction of the range height back inside it
+    breakout_target_range_mult: float = 1.0  # target: this many range heights beyond the edge
+
     # --- News ------------------------------------------------------------------------
     news_calendar_url: str = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     # Comma-separated "CURRENCY|url" pairs of RSS feeds with central-bank communication.
     news_rss_feeds: str = (
         "USD|https://www.federalreserve.gov/feeds/press_monetary.xml,"
-        "EUR|https://www.ecb.europa.eu/rss/press.html"
+        "EUR|https://www.ecb.europa.eu/rss/press.html,"
+        "GBP|https://www.bankofengland.co.uk/rss/news"
     )
     news_interpretation_enabled: bool = True
     # Block new trades when the calendar could not be refreshed recently (fail closed).
@@ -150,6 +166,8 @@ class Settings(BaseSettings):
     # --- API / dashboard -----------------------------------------------------------------
     dashboard_username: str = "admin"
     dashboard_password: str = ""
+    # Second password for the config page (credentials, risk limits); the page stays locked until set.
+    config_password: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
@@ -189,6 +207,16 @@ class Settings(BaseSettings):
             raise ValueError("MIN_DECISION_CONFIDENCE must be between 0 and 1")
         if self.min_stop_pips <= 0 or self.max_stop_pips <= self.min_stop_pips:
             raise ValueError("Require 0 < MIN_STOP_PIPS < MAX_STOP_PIPS")
+        if not 5 <= self.breakout_range_bars <= 28:
+            raise ValueError("BREAKOUT_RANGE_BARS must be between 5 and 28")
+        if not 0 < self.breakout_min_range_atr < self.breakout_max_range_atr:
+            raise ValueError("Require 0 < BREAKOUT_MIN_RANGE_ATR < BREAKOUT_MAX_RANGE_ATR")
+        if self.breakout_min_touches < 1 or not 1 <= self.breakout_fresh_bars <= 20:
+            raise ValueError("BREAKOUT_MIN_TOUCHES must be >= 1 and BREAKOUT_FRESH_BARS between 1 and 20")
+        if self.breakout_buffer_atr < 0 or self.breakout_min_body_atr < 0:
+            raise ValueError("BREAKOUT_BUFFER_ATR and BREAKOUT_MIN_BODY_ATR must be >= 0")
+        if not 0 < self.breakout_stop_range_frac <= 1.0 or self.breakout_target_range_mult <= 0:
+            raise ValueError("Require 0 < BREAKOUT_STOP_RANGE_FRAC <= 1 and BREAKOUT_TARGET_RANGE_MULT > 0")
         if self.trading_mode == TradingMode.LIVE and self.live_trading_confirm != LIVE_CONFIRM_PHRASE:
             raise ValueError(
                 "TRADING_MODE=live requires LIVE_TRADING_CONFIRM="

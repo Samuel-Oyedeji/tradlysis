@@ -67,3 +67,5 @@ class ControlKey(StrEnum):
     DAY_START_NAV = "day_start_nav"  # {"trading_day": str, "value": str}
     LAST_TRANSACTION_ID = "last_transaction_id"  # {"value": str}
     ENGINE_HEARTBEAT = "engine_heartbeat"  # live status published by the engine
+    CONFIG_VERSION = "config_version"  # {"version": int, "at": str, "by": str}; bumped on every config save
+    CONFIG_IMPORTED = "config_imported"  # {"keys": [...]}; set once the environment was copied in

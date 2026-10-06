@@ -36,6 +36,7 @@ class FakeBroker:
     bid: float = 1.1025
     ask: float = 1.1026
     market_status: str = "TRADEABLE"
+    hedging_mode: bool = False
     account_without_balance: bool = False  # simulate an /accounts entry with no balance object
     # behaviour switches for POST /positions
     order_mode: str = "fill"  # fill | reject | reject_confirm | no_confirm | timeout_before | timeout_after | http500
@@ -160,7 +161,7 @@ class FakeBroker:
                 "balance": {"balance": self.nav, "deposit": self.nav - upl, "profitLoss": upl, "available": self.nav},
             }]})
         if path == "/accounts/preferences":
-            return httpx.Response(200, json={"hedgingMode": False, "leverages": {}})
+            return httpx.Response(200, json={"hedgingMode": self.hedging_mode, "leverages": {}})
         m = re.fullmatch(r"/markets/([^/]+)", path)
         if m:
             if m.group(1) != EPIC:
