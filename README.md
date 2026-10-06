@@ -100,7 +100,7 @@ DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.poole
 
 ### Tables are created automatically
 
-At start-up the engine, API and analyzer check for the bot's 18 tables and create any that are
+At start-up the engine, API and analyzer check for the bot's 21 tables and create any that are
 missing, with the same indexes and foreign keys as the Prisma migration. They never alter, empty
 or drop a table, and they never touch tables that aren't the bot's, so it is safe on a database
 shared with other apps. Tables the bot creates get row-level security switched on (with no

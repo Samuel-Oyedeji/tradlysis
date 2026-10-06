@@ -424,3 +424,56 @@ model AnalysisReport {
   @@index([experiment, createdAt])
   @@map("analysis_reports")
 }
+
+// ---------------------------------------------------------------------------
+// Configuration and experiments (edited on the dashboard's config page)
+// ---------------------------------------------------------------------------
+
+/// Application settings edited in-app. One row per setting; the key is the setting's ENV name in
+/// lower case (e.g. openrouter_api_key). Values are text and are validated by app/config/settings.py.
+/// Only bootstrap values (DATABASE_URL, passwords, TRADING_MODE) stay in the environment.
+model AppConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  updatedBy String?  @map("updated_by")
+
+  @@map("app_config")
+}
+
+/// Audit trail of configuration changes. Secret values are never stored here.
+model ConfigChange {
+  id        BigInt   @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  scope     String // "global" or an experiment slug
+  key       String
+  oldValue  String?  @map("old_value")
+  newValue  String?  @map("new_value")
+  changedBy String   @map("changed_by")
+
+  @@index([createdAt])
+  @@map("config_changes")
+}
+
+/// An experiment the engine runs: one strategy on one instrument, with its own parameters and
+/// its own risk limits. Every experiment trades on the same broker account; trades are attributed
+/// through their orders. `slug` is the `experiment` value in decision_requests, trades and
+/// analysis_reports.
+model Experiment {
+  id          BigInt   @id @default(autoincrement())
+  slug        String   @unique
+  name        String
+  description String?
+  instrument  String
+  strategy    String   @default("trend_pullback")
+  enabled     Boolean  @default(false)
+  /// The experiment's own starting capital in account currency; sizing and loss limits use
+  /// capital + the experiment's P/L. Empty until the engine sets it from the account balance.
+  capital     Decimal? @db.Decimal(20, 6)
+  /// Per-experiment parameters (risk limits, strategy, model), keyed like app_config.
+  settings    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("experiments")
+}

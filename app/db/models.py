@@ -509,3 +509,44 @@ class AnalysisReport(Base):
     period_start: Mapped[datetime | None] = mapped_column(TZ)
     period_end: Mapped[datetime] = mapped_column(TZ, nullable=False)
     metrics: Mapped[Any] = mapped_column(JSONB, nullable=False)
+
+
+# --- Configuration and experiments ------------------------------------------------------
+
+
+class AppConfig(Base):
+    __tablename__ = "app_config"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = _now_col(onupdate=func.now())
+    updated_by: Mapped[str | None] = mapped_column(Text)
+
+
+class ConfigChange(Base):
+    __tablename__ = "config_changes"
+    __table_args__ = (Index("config_changes_created_at_idx", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = _now_col()
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    old_value: Mapped[str | None] = mapped_column(Text)
+    new_value: Mapped[str | None] = mapped_column(Text)
+    changed_by: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class Experiment(Base):
+    __tablename__ = "experiments"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    instrument: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'trend_pullback'"))
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    capital: Mapped[Decimal | None] = mapped_column(MONEY)
+    settings: Mapped[dict] = _json_col()
+    created_at: Mapped[datetime] = _now_col()
+    updated_at: Mapped[datetime] = _now_col(onupdate=func.now())
