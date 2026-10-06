@@ -64,12 +64,22 @@ class Notifier:
         telegram: TelegramSender | None,
         dedup_seconds: int = 300,
         label: str = "",
+        experiment: str | None = None,
+        *,
+        _last_sent: dict[str, float] | None = None,
     ) -> None:
         self.db = db
         self.telegram = telegram
         self.dedup_seconds = dedup_seconds
         self.label = label
-        self._last_sent: dict[str, float] = {}
+        # Events about one experiment carry its slug in details["experiment"] (the dashboard filters on it).
+        self.experiment = experiment
+        self._last_sent: dict[str, float] = {} if _last_sent is None else _last_sent
+
+    def for_experiment(self, slug: str, name: str) -> Notifier:
+        """A notifier for one experiment: its events are tagged and its alerts name it."""
+        label = f"{self.label} {name}".strip()
+        return Notifier(self.db, self.telegram, self.dedup_seconds, label, slug, _last_sent=self._last_sent)
 
     async def event(
         self,
@@ -83,6 +93,9 @@ class Notifier:
         dedup_key: str | None = None,
     ) -> None:
         details = details or {}
+        if self.experiment:
+            details = {"experiment": self.experiment, **details}
+            dedup_key = f"{self.experiment}:{dedup_key or event_type}"
         log.log(_py_level(level), "[%s] %s: %s %s", component, event_type, message, details or "")
         if self.db is not None:
             try:

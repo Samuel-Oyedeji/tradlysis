@@ -3,8 +3,10 @@
 An AI-assisted, systematic FX trading bot, implementing the *AI-Assisted Systematic FX
 Trading Bot: Technical Architecture & V1 Product Specification*.
 
-V1 is an **experiment, not a claim of profitability**. It trades **EUR/USD** with one setup
-(**trend pullback**) on a **Capital.com demo account**. It combines deterministic
+V1 is an **experiment, not a claim of profitability**. It runs one or more **experiments**
+side by side (V1's is **EUR/USD** with one setup, **trend pullback**) on one **Capital.com demo
+account**. Each experiment has its own pair, parameters, capital and risk limits (see
+[Experiments](#experiments)), and everything is configured in the dashboard. It combines deterministic
 technical analysis with structured news context and uses TypeSafe's Jev decision model
 (`typesafe/jev-1.13`, through OpenRouter's Decisions API) only to confirm setups. A deterministic risk engine has the final say. Every
 decision opportunity is recorded, including WAITs and rejections.
@@ -18,15 +20,31 @@ decision opportunity is recorded, including WAITs and rejections.
 
 ## What you need to provide
 
-Nothing below is committed to the repository. Put it in `.env` (copy `.env.example`).
+Nothing below is committed to the repository. The server's `.env` (copy `.env.example`) holds
+only what is needed before the database can be read, plus the trading mode:
 
 | What | Variables | Where to get it |
 |---|---|---|
-| Capital.com demo account + API key | `CAPITAL_DEMO_API_KEY`, `CAPITAL_DEMO_IDENTIFIER` (login e-mail), `CAPITAL_DEMO_API_PASSWORD` (the API key's custom password); optional `CAPITAL_DEMO_ACCOUNT_ID` | capital.com → enable 2FA → *Settings → API integrations → Generate API key* |
 | PostgreSQL database (Supabase) | `DATABASE_URL` | Supabase → *Connect* → **Session pooler** connection string (see below); any PostgreSQL 14+ also works |
-| OpenRouter | `OPENROUTER_API_KEY` (model defaults to `typesafe/jev-1.13`) | openrouter.ai → Keys |
-| Dashboard password | `DASHBOARD_PASSWORD` | choose one; the API stays locked until set |
-| Telegram alerts (optional) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | @BotFather; steps in `.env.example` |
+| Dashboard login | `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD` | choose them; the API stays locked until set |
+| Config page password | `CONFIG_PASSWORD` | choose one, different from the dashboard password; the Config page stays locked until set |
+| Trading mode (optional) | `TRADING_MODE`, `LIVE_TRADING_CONFIRM` | `demo` by default; real money can only be switched on here, on the server |
+
+Everything else is entered on the dashboard's **Config page** (`/config`, see
+[Config page](#config-page-config)) and stored in the database:
+
+| What | Settings | Where to get it |
+|---|---|---|
+| Capital.com demo account + API key | API key, login e-mail, API key password; optional account ID | capital.com → enable 2FA → *Settings → API integrations → Generate API key* |
+| OpenRouter | API key (model defaults to `typesafe/jev-1.13`, per experiment) | openrouter.ai → Keys |
+| Telegram alerts (optional) | bot token, chat ID | @BotFather → `/newbot`; message the bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` for the chat ID |
+| Experiments | pair, capital, risk limits, strategy and model settings | your choice |
+
+Upgrading from a version where everything was in `.env`: keep the old `.env` for the first start.
+The engine (or API) copies those values into the database once, and turns `EXPERIMENT_NAME`,
+`INSTRUMENT` and the risk settings into the first experiment, with its history. Afterwards you
+can delete everything but the variables above from `.env`; the Config page lists any that are
+still there but no longer used.
 
 Then check everything with the setup checker, which never trades:
 
@@ -35,9 +53,11 @@ python -m app.doctor              # or: docker compose run --rm engine python -m
 python -m app.doctor --telegram   # also sends a Telegram test message
 ```
 
-The Capital.com check logs in on the demo host, then reads the account, the EURUSD market
-(pip size, minimum size, margin, status), your hedging-mode preference and three M15 candles,
-and waits up to 15 s for a live quote on the WebSocket stream.
+It checks the configuration the engine would use (the Config page's settings over `.env`) and
+lists every experiment with its limits. The Capital.com check logs in on the demo host, then reads
+the account, your hedging-mode preference and, for each enabled experiment's market, its pip size,
+minimum size, margin, status and three M15 candles, and waits up to 15 s for a live quote on the
+WebSocket stream.
 
 ## Broker: Capital.com
 
@@ -61,7 +81,11 @@ What the Capital.com API does not provide, and how the bot compensates:
 - **No price bound on market orders.** A fill worse than `MAX_SLIPPAGE_PIPS` from the price the
   risk engine approved is closed straight away and alerted (`SLIPPAGE_EXCEEDED`).
 - **No "open only" flag.** Right before sending an entry, the executor re-reads open positions
-  and refuses if one exists on EUR/USD, so an order can never net against an open position.
+  and the account's hedging mode. With hedging off (Capital.com nets positions per market), it
+  refuses if *any* position is open on the pair, whichever experiment owns it, so an order can
+  never net against an open position. With hedging on, positions stay separate: it refuses only
+  while this experiment, or a position no experiment owns, holds the pair. Two experiments on
+  the same pair therefore need hedging mode on to trade at the same time.
 - **P/L of closed trades** is computed from the open and close prices (exact for a USD account
   on EUR/USD). The broker's own cash movements, including overnight funding, are stored in
   `broker_transactions`.
@@ -100,7 +124,7 @@ DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.poole
 
 ### Tables are created automatically
 
-At start-up the engine, API and analyzer check for the bot's 18 tables and create any that are
+At start-up the engine, API and analyzer check for the bot's 21 tables and create any that are
 missing, with the same indexes and foreign keys as the Prisma migration. They never alter, empty
 or drop a table, and they never touch tables that aren't the bot's, so it is safe on a database
 shared with other apps. Tables the bot creates get row-level security switched on (with no
@@ -129,8 +153,11 @@ docker compose run --rm migrate
 ```
 
 `migrate deploy` only runs migration files that are not yet recorded in `_prisma_migrations`.
-If the tables were created by the bot or by hand, record the initial migration as applied first
-(this runs no SQL): `npx prisma migrate resolve --applied 20260930084057_init`.
+If the tables were created by the bot or by hand, record those migrations as applied first
+(this runs no SQL): `npx prisma migrate resolve --applied 20260930084057_init`, and likewise
+`20261006085014_config_and_experiments` once the bot has created the `app_config`,
+`config_changes` and `experiments` tables. That migration only adds new tables, so the bot
+creates them itself at start-up; no migration has to be run to deploy it.
 **On a shared database never run `prisma migrate dev`, `prisma migrate reset` or `prisma db push`:**
 they compare the whole database with this schema and can drop other apps' tables.
 
@@ -215,24 +242,62 @@ python -m app.experiments.analyzer --once       # print a report
 
 ## Dashboard (desktop and mobile)
 
-On desktop the pages share a sidebar with navigation and live status: mode, engine,
-price stream, whether trading is allowed, and alerts. On phones this becomes a top bar
-with Overview/History tabs.
+On desktop the pages share a sidebar with the experiment picker, navigation and live status:
+mode, engine, price stream, whether trading is allowed, and alerts. On phones this becomes a top
+bar with the picker and tabs.
 
 Open `https://<your-host>/` and sign in with `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`.
+Overview, History and Analysis show **one experiment**, picked in the sidebar. The browser
+remembers the choice, and `?experiment=<id>` in a link selects one.
 
-- **Last decision:** the path the latest 15-minute cycle took (candle → setup → model →
-  risk → order) and where it stopped, linking to its timeline.
-- Status: demo/live, engine heartbeat, kill switch and breaker state, NAV, today's P/L,
+- **Last decision:** the path the experiment's latest 15-minute cycle took (candle → setup →
+  model → risk → order) and where it stopped, linking to its timeline.
+- Status: demo/live, engine heartbeat, kill switch and breaker state, the experiment's equity
+  (its capital plus the P/L of its trades; the account's NAV is shown under it), today's P/L,
   price and spread.
-- NAV chart for the last 7 days, with a table view.
-- **Controls:** kill switch (stops new orders at once), *close all trades*, reset the
-  daily or drawdown breaker. A reset measures from the current account value: the daily loss
-  until the next trading day, the drawdown from now on.
+- The experiment's equity for the last 7 days (its balance after each closed trade, then its
+  live equity), with a table view.
+- **Controls:** the experiment's kill switch (stops its new orders at once), *close this
+  experiment's trades*, and reset its daily or drawdown breaker. A reset measures from the
+  experiment's current equity: the daily loss until the next trading day, the drawdown from now
+  on. Under *All experiments*: the account-wide kill switch and *close every trade on the
+  account*.
 - Open and closed trades (with R multiples), every 15-minute decision opportunity (tap one
   to see the exact snapshot sent to the model, its raw answer and every risk check), the
   experiment summary, the news calendar (first five items, the rest scroll), central-bank reads
   and system events.
+
+### Experiments page (`/experiments`)
+
+Every experiment side by side: running or switched off (and why it is halted), equity,
+capital, realized and open P/L, trades, win rate, total R, risk per trade, model and last
+decision, plus the shared account's NAV, open trades and margin. Each card opens that
+experiment's overview or analysis.
+
+### Config page (`/config`)
+
+Replaces editing `.env` on the server. It needs the dashboard login **and** `CONFIG_PASSWORD`,
+which unlocks the page in that browser tab for 15 minutes (extended while you use it; *Lock* ends
+it early). After five wrong passwords it refuses further attempts for five minutes.
+
+- **Experiments:** switch each one on or off, rename it, set its capital and any of its
+  parameters (risk limits, trade filters, news rules, strategy settings, model and when to call
+  it). *Reset* returns a parameter to the global default. The pair is fixed once an experiment
+  has made a decision; create a new experiment for another pair.
+- **New experiment:** id (permanent; stored with every decision and trade), name, pair,
+  capital, and optionally the parameters of an existing experiment to start from. New
+  experiments start switched off.
+- **Global settings:** Capital.com demo and live credentials, OpenRouter, news sources,
+  Telegram, safety and scheduling. Secrets are never sent back to the browser: a saved one shows
+  as *saved*, and typing replaces it. *Reset* removes the saved value, so `.env` or the default
+  applies again.
+- **Recent changes:** who changed what and when. Secret values are never recorded.
+
+Every value is validated with the same rules as before, including the hard risk ceilings,
+before anything is saved. A saved change reaches the engine within about ten seconds: it lets
+a running decision cycle finish, then restarts itself (in the same process) with the new
+configuration. The trading mode stays in `.env`, so a stolen dashboard password can never
+switch on real money.
 
 ### Analysis page (`/analysis`)
 
@@ -313,7 +378,8 @@ place orders.
    - **Overall market regime** (deterministic): strong uptrend, strong downtrend, breakout,
      compression, range, event risk or unclear. The trend-pullback setup suits the strong
      trends; the analyzer reports results per regime.
-4. **Trend-pullback check** (deterministic, `app/strategy/trend_pullback.py`):
+4. **Strategy check** (deterministic), with the experiment's own strategy and parameters.
+   **Trend pullback** (`app/strategy/trend_pullback.py`):
    - H4 trend sets the direction.
    - H1 trend must not oppose it.
    - M15 price has pulled back into a support/resistance zone or the M15 EMA50, by at least
@@ -322,6 +388,20 @@ place orders.
    - Stop sits beyond the pullback plus 0.25 ATR; the target is the next opposing level
      (or 2R), capped at 4R.
    - The setup needs R:R of at least 1:2 (Experiment #1).
+
+   **Range breakout** (`app/strategy/range_breakout.py`) trades what the pullback skips: a range
+   that resolves into a breakout.
+   - Range: the 20 completed H1 bars before the latest one, 1.5–6× ATR(H1) tall, with at least
+     two separate visits to each edge.
+   - Break: the latest M15 candle closes beyond the edge by 0.1× ATR(M15), with a body of at least
+     0.5× ATR(M15), closing in the outer third of its range.
+   - Fresh: none of the 4 M15 candles before it closed beyond the edge (no chasing).
+   - The H4 trend does not point against the break.
+   - Stop 30% of the range height back inside it; target the measured move (one range height
+     beyond the edge), capped at 4R. Stop distance and the experiment's minimum R:R apply.
+     These plans usually land around 1.2–2R, so run breakout experiments with a minimum R:R
+     of about 1.5.
+   All of these are experiment settings on the Config page.
 5. **Market snapshot** is built and stored in `decision_requests` (unique per candle, so a
    restart never processes a candle twice).
 6. **Decision model**: Jev through OpenRouter's Decisions API (`POST /api/alpha/decisions`).
@@ -344,8 +424,8 @@ place orders.
    - stop distance and R:R re-checked at the *current* price
    - total open risk; margin
 
-   It sizes the position itself: 0.25% of equity by default, converted to the account
-   currency.
+   It sizes the position itself: 0.25% of the experiment's equity by default, converted to the
+   account currency.
 8. **Executor** (the only order submitter): writes the order row first, and re-checks the
    kill switch and that no position is open on the instrument. It then sends a market order
    with stop-loss and take-profit levels and confirms it by its deal reference. A fill beyond
@@ -354,22 +434,77 @@ place orders.
    Capital.com*).
 9. **Reconciliation** (every 15 s): account balances, open positions, trade closes with R
    (from the activity history), the broker activity/transaction audit trail, stuck orders,
-   unexpected positions (critical alert), peak and start-of-day NAV, and the circuit breakers.
+   unexpected positions (critical alert), each experiment's equity, peak and start-of-day equity,
+   and its circuit breakers.
+
+## Experiments
+
+An experiment is one strategy on one pair, with its own parameters, model and risk limits.
+Several run at the same time in one engine on **one broker account**, for example the EUR/USD
+trend pullback next to a GBP/USD one, or two EUR/USD variants with different minimum
+risk:reward. They are created and edited on the Config page.
+
+- **Shared:** the Capital.com session and account, one price stream for all pairs, candles
+  and technicals per pair, the news calendar and central-bank reads, reconciliation, and the
+  executor (still the only component that places orders).
+- **Per experiment:** decisions (`decision_requests.experiment` is its id), trades (attributed
+  through their orders), Telegram alerts (named after it), system events, analysis reports,
+  and its **own risk pool**:
+  - *equity* = its capital + realized P/L of its closed trades + open P/L of its open trades.
+    The capital is set on the Config page; if left empty, the engine sets it once from the
+    account's cash balance (net of anything the experiment already made).
+  - position size, total open risk and max open trades use its equity and its trades only;
+  - its daily-loss and drawdown breakers measure its equity, and trip, reset and halt only it;
+  - its own kill switch and *close its trades*.
+  - Margin and account health are checked on the account, because they are physical limits of
+    the one account.
+
+Because each experiment has its own pool, losses add up across experiments: with three
+experiments at a 5% drawdown limit, the account can lose more than 5% before all of them stop.
+The account-wide kill switch stops all of them at once.
+
+Two experiments on the same pair need the account's **hedging mode** on to hold positions at
+the same time (see *Broker: Capital.com*); with it off, the first one to open a position blocks
+the others until it closes. `python -m app.doctor` warns about this.
+
+Two strategies exist: **trend pullback** and **range breakout** (see *How a decision is made*).
+An experiment's strategy is chosen when it is created and is fixed once it has made a decision.
+Each strategy has its own questions for the model (`app/decision/prompts.py`, versioned
+separately). A new strategy is a module in `app/strategy/` returning a `StrategyResult`, a
+`DecisionPrompt`, an entry in `app/strategy/registry.py` and a branch in
+`app.engine.evaluate_strategy`.
+
+Example line-up, all on one account with hedging mode on:
+
+| Experiment | Pair | Strategy | Suggested changes from the defaults |
+|---|---|---|---|
+| `v1-trend-pullback-eur-usd` | EUR/USD | trend pullback | (V1) |
+| `gbpusd-pullback` | GBP/USD | trend pullback | copy V1's parameters; max spread 2.0 pips |
+| `eurusd-breakout` | EUR/USD | range breakout | min R:R 1.5 |
+| `gbpusd-breakout` | GBP/USD | range breakout | min R:R 1.5; max spread 2.0 pips |
+
+For GBP experiments the news settings need a Bank of England feed (`GBP|https://www.bankofengland.co.uk/rss/news`,
+the default for new installations); `python -m app.doctor` names any traded currency without one.
+
+**Going live** uses the same model: point the live credentials at the one live account and
+enable the experiments that should trade it. Each keeps its own capital and limits, so set
+their capitals to the share of the account each one may use.
 
 ## Safety controls
 
 - Demo by default: demo mode always uses Capital.com's demo API host. Live mode requires
-  `TRADING_MODE=live`, the exact `LIVE_TRADING_CONFIRM` phrase and separate `CAPITAL_LIVE_*`
-  credentials.
+  `TRADING_MODE=live` and the exact `LIVE_TRADING_CONFIRM` phrase in the server's `.env`, and
+  separate live credentials.
 - Risk settings have hard ceilings: at most 1% per trade, 2% total risk, 5% daily loss
-  and 20% drawdown.
-- Global kill switch (dashboard), and daily-loss (auto-resets next trading day at 17:00 New
-  York, or manually) and max-drawdown (manual reset) circuit breakers.
+  and 20% drawdown, per experiment. Values typed on the Config page are checked against them.
+- Kill switches (account-wide and per experiment), and daily-loss (auto-resets next trading day
+  at 17:00 New York, or manually) and max-drawdown (manual reset) circuit breakers per experiment.
 - Duplicate protection:
   - one decision per candle
   - one order per approved risk check
   - never resubmitting an entry whose outcome was unknown
-  - refusing an entry while a position is open on the instrument
+  - refusing an entry while a position is open on the instrument (see *Broker: Capital.com* for
+    how hedging mode changes this between experiments)
   - no new orders while any order is unresolved
 - Telegram alerts, kept to what matters (everything else is logged and shown under system
   events on the dashboard):
@@ -382,10 +517,11 @@ place orders.
 
 ## Experiment analysis
 
-`python -m app.experiments.analyzer --once` prints (and stores in `analysis_reports`):
+`python -m app.experiments.analyzer --once` prints (and stores in `analysis_reports`) a report
+for every experiment (`--experiment <id>` for one):
 - opportunities, setup candidates, model calls, decisions, and rejection/WAIT reasons
 - wins/losses, average winner and loser in R, expectancy, profit factor, max drawdown (in
-  R and account %)
+  R and as a % of the experiment's equity)
 - performance by setup condition, overall market regime, volatility and trend regime, news risk, model-confidence
   bucket, direction and planned risk:reward
 - setups that failed exactly one rule, and a what-if replay of those blocked only by risk:reward
@@ -408,14 +544,14 @@ also fails if `schema.prisma` has changes without a migration.
 
 ```
 app/
-  config/          settings (env vars, safety validation)
+  config/          settings (safety validation) and the database-backed configuration store
   broker/          Capital.com REST + WebSocket client, broker-neutral types
   market_data/     price stream, market state, candles, market hours
   technicals/      indicators, structure, levels, regimes, technical state
   news/            calendar/RSS providers, LLM interpretation, news state
   snapshot/        market snapshot builder
-  strategy/        deterministic trend-pullback rules and trade plan
-  decision/        OpenRouter client (Decisions API + chat), prompts/questions (versioned), schema
+  strategy/        deterministic strategies (trend pullback, range breakout), trade plans, registry
+  decision/        OpenRouter client (Decisions API + chat), prompts/questions per strategy (versioned), schema
   risk/            deterministic risk engine and currency conversion
   execution/       order executor (only component that submits orders)
   reconciliation/  broker ↔ database reconciliation and circuit breakers
@@ -433,7 +569,7 @@ tests/
 ## Out of scope for V1 (per the specification)
 
 These are deliberately not built:
-- multiple pairs, high-frequency trading and real-money trading
+- high-frequency trading and real-money trading
 - large indicator collections
 - LLM-created strategies, LLM-controlled sizing or bypassing risk limits
 - arbitrage

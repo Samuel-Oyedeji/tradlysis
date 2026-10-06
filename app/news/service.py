@@ -194,8 +194,10 @@ class NewsService:
 
     # ------------------------------------------------------------------ state
 
-    async def current_state(self, now: datetime) -> NewsState:
-        base, quote = self.settings.instrument_currencies
+    async def current_state(self, now: datetime, settings: Settings | None = None) -> NewsState:
+        """News state for one experiment: its instrument's currencies and its blackout rules."""
+        cfg = settings or self.settings
+        base, quote = cfg.instrument_currencies
         currencies = [base, quote]
         async with self.db.session() as s:
             events = (
@@ -232,9 +234,9 @@ class NewsService:
             ],
             now,
             currencies,
-            blocking_impacts=self.settings.news_blocking_impacts,
-            blackout_before_minutes=self.settings.news_blackout_before_minutes,
-            blackout_after_minutes=self.settings.news_blackout_after_minutes,
+            blocking_impacts=cfg.news_blocking_impacts,
+            blackout_before_minutes=cfg.news_blackout_before_minutes,
+            blackout_after_minutes=cfg.news_blackout_after_minutes,
             bias_lookback_hours=self.settings.news_bias_lookback_hours,
             calendar_fresh=fresh,
         )

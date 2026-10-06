@@ -371,3 +371,43 @@ def test_time_helpers():
     # Trading day rolls at 17:00 New York (21:00 UTC in EDT)
     assert trading_day(parse_time("2026-09-29T20:59:00Z")).isoformat() == "2026-09-29"
     assert trading_day(parse_time("2026-09-29T21:00:00Z")).isoformat() == "2026-09-30"
+
+
+async def test_one_client_serves_several_markets():
+    seen = []
+
+    def handler(req):
+        seen.append((req.url.path, dict(req.url.params)))
+        return httpx.Response(200, json={"activities": [{"epic": "EURUSD"}, {"epic": "GBPUSD"}, {"epic": "US500"}],
+                                         "prices": []})
+
+    c = make(session_then(handler))
+    assert c.register_market("GBP_USD") == "GBPUSD"
+    with pytest.raises(ValueError):
+        c.register_market("GBP_USD", "GBPUSD_X")
+    assert c.instrument_for_epic("GBPUSD") == "GBP_USD" and c.instrument_for_epic("US500") == "US500"
+    end = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+    both = await c.get_activity(end - timedelta(hours=1), end)
+    assert "filter" not in seen[-1][1], "several markets are filtered here, not by the API"
+    assert [a["epic"] for a in both] == ["EURUSD", "GBPUSD"]
+    await c.get_activity(end - timedelta(hours=1), end, instrument="GBP_USD")
+    assert seen[-1][1]["filter"] == "epic==GBPUSD"
+    await c.get_candles("H1", 10, instrument="GBP_USD")
+    assert seen[-1][0].endswith("/prices/GBPUSD")
+
+
+async def test_quote_stream_subscribes_every_market():
+    ws = FakeWs([
+        {"status": "OK", "destination": "marketData.subscribe", "correlationId": "subscribe",
+         "payload": {"subscriptions": {"EURUSD": "PROCESSED", "GBPUSD": "PROCESSED"}}},
+        {"status": "OK", "destination": "quote", "payload": {"epic": "GBPUSD", "bid": 1.3, "ofr": 1.3001}},
+        ConnectionResetError("gone"),
+    ])
+    c = make(session_then(lambda r: httpx.Response(200, json={})), ws_connect=lambda url: ws)
+    c.register_market("GBP_USD")
+    msgs = []
+    with pytest.raises(CapitalTransportError):
+        async for m in c.stream_quotes():
+            msgs.append(m)
+    assert ws.sent[0]["payload"] == {"epics": ["EURUSD", "GBPUSD"]}
+    assert msgs[1].instrument == "GBP_USD" and msgs[1].ask == 1.3001

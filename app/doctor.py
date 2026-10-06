@@ -4,7 +4,8 @@
     python -m app.doctor --telegram # also send a Telegram test message
 
 Safe to run at any time: it only reads from Capital.com (it never places orders), sends one tiny
-prompt to OpenRouter and (optionally) one Telegram message.
+prompt to OpenRouter per model and (optionally) one Telegram message. It checks the configuration
+the engine would use: the settings saved on the config page, over the environment.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 
 from app.config.settings import Settings, get_settings
+from app.config.store import Configuration, ExperimentConfig, single_experiment
 
 OK = "✓"
 FAIL = "✗"
@@ -62,40 +64,68 @@ async def check_database(s: Settings) -> str:
     return f"connected; all {total} tables present{note}"
 
 
-async def check_capital(s: Settings) -> str:
+async def load_config(s: Settings) -> Configuration:
+    """The stored configuration (read-only); the environment alone if the database has none yet."""
+    from app.config.store import load_configuration
+    from app.db.session import Database
+
+    db = Database(s)
+    try:
+        config = await load_configuration(db, s)
+    finally:
+        await db.dispose()
+    if not config.experiments:
+        config.experiments = single_experiment(config.settings).experiments
+    return config
+
+
+async def check_capital(s: Settings, experiments: list[ExperimentConfig]) -> str:
     s.require_broker_credentials()
     from app.broker.capital import CapitalClient
 
+    first = experiments[0] if experiments else None
     client = CapitalClient(
         s.capital_base_url,
         s.capital_api_key,
         s.capital_identifier,
         s.capital_api_password,
         account_id=s.capital_account_id,
-        instrument=s.instrument,
-        epic=s.broker_epic,
+        instrument=first.instrument if first else s.instrument,
+        epic=first.settings.broker_epic if first else s.broker_epic,
         stream_url=s.capital_stream_url,
         max_get_retries=1,
     )
+    for e in experiments:
+        client.register_market(e.instrument, e.settings.broker_epic)
+    markets = []
+    warn = []
     try:
         acct = await client.get_account()
-        inst = await client.get_instrument()
-        status = await client.get_market_status()
         prefs = await client.get_preferences()
-        candles = await client.get_candles("M15", count=3)
+        for instrument, epic in client.markets.items():
+            inst = await client.get_instrument(instrument)
+            status = await client.get_market_status(instrument)
+            candles = await client.get_candles("M15", count=3, instrument=instrument)
+            markets.append(
+                f"{inst.epic or epic}: pip {inst.pip_size}, min size {inst.minimum_trade_size}, "
+                f"margin {inst.margin_rate:.2%}, status {status}, {len(candles)} M15 candles"
+            )
+            if inst.lot_size != 1:
+                warn.append(f"{epic} lot size {inst.lot_size} != 1: the engine will refuse to start")
         stream = await _first_quote(client)
     finally:
         await client.aclose()
-    warn = []
-    if inst.lot_size != 1:
-        warn.append(f"lot size {inst.lot_size} != 1: the engine will refuse to start")
-    if prefs.get("hedgingMode"):
-        warn.append("hedging mode is ON (fine: the executor still refuses to open a second position)")
+    instruments = [e.instrument for e in experiments]
+    shared = sorted({i for i in instruments if instruments.count(i) > 1})
+    if shared and not prefs.get("hedgingMode"):
+        warn.append(
+            f"hedging mode is OFF and several experiments trade {', '.join(shared)}: only one of them can hold a "
+            "position at a time (turn hedging on in Capital.com to let each keep its own)"
+        )
     host = "demo" if "demo-api" in s.capital_base_url else "LIVE"
     return (
-        f"{host} host, account {acct.account_id} {acct.currency} equity {acct.nav} (available {acct.margin_available}); "
-        f"{inst.epic or s.broker_epic}: pip {inst.pip_size}, min size {inst.minimum_trade_size}, "
-        f"margin {inst.margin_rate:.2%}, status {status}; {len(candles)} M15 candles; stream: {stream}"
+        f"{host} host, account {acct.account_id} {acct.currency} equity {acct.nav} (available {acct.margin_available}), "
+        f"hedging {'on' if prefs.get('hedgingMode') else 'off'}; {'; '.join(markets)}; stream: {stream}"
         + (f" (warning: {'; '.join(warn)})" if warn else "")
     )
 
@@ -114,7 +144,14 @@ async def _first_quote(client, timeout: float = 15.0) -> str:
         return f"connected, no quote within {timeout:.0f}s (market closed?)"
 
 
-async def check_openrouter(s: Settings) -> str:
+async def check_openrouter(s: Settings, models: list[str]) -> str:
+    results = []
+    for model in dict.fromkeys(models):
+        results.append(await check_model(s.model_copy(update={"openrouter_model": model})))
+    return "; ".join(results)
+
+
+async def check_model(s: Settings) -> str:
     if not s.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
     from app.decision.openrouter import OpenRouterClient, uses_decisions_api
@@ -155,13 +192,16 @@ async def check_openrouter(s: Settings) -> str:
     return f"model {s.openrouter_model} answered in {r.latency_ms} ms using structured-output mode '{r.mode}'"
 
 
-async def check_calendar(s: Settings) -> str:
+async def check_calendar(s: Settings, experiments: list[ExperimentConfig]) -> str:
     from app.news.providers.forexfactory import ForexFactoryCalendar
 
     events = await ForexFactoryCalendar(s.news_calendar_url).fetch()
-    base, quote = s.instrument_currencies
-    high = [e for e in events if e.impact == "HIGH" and e.currency in (base, quote)]
-    return f"{len(events)} events this week, {len(high)} high-impact for {base}/{quote}"
+    currencies = sorted({c for e in experiments for c in e.settings.instrument_currencies})
+    high = [e for e in events if e.impact == "HIGH" and e.currency in currencies]
+    feeds = {cur for cur, _ in s.rss_feeds}
+    missing = [c for c in currencies if c not in feeds]
+    note = f" (no central-bank RSS feed for {', '.join(missing)})" if missing else ""
+    return f"{len(events)} events this week, {len(high)} high-impact for {'/'.join(currencies)}{note}"
 
 
 async def check_rss(s: Settings) -> str:
@@ -193,7 +233,9 @@ async def check_telegram(s: Settings, send: bool) -> str:
 def check_dashboard(s: Settings) -> str:
     if not s.dashboard_password:
         raise RuntimeError("DASHBOARD_PASSWORD not set: the dashboard/API stays locked")
-    return f"user '{s.dashboard_username}', password set"
+    if not s.config_password:
+        raise RuntimeError(f"user '{s.dashboard_username}' set, but CONFIG_PASSWORD is not: the config page stays locked")
+    return f"user '{s.dashboard_username}', dashboard and config passwords set"
 
 
 async def main() -> int:
@@ -205,21 +247,35 @@ async def main() -> int:
     except Exception as exc:
         print(f"{FAIL} settings: {exc}")
         return 1
-    print(f"Mode: {s.trading_mode.value} · instrument {s.instrument} · experiment {s.experiment_name}")
-    print(
-        f"Risk: {s.risk_per_trade_pct}%/trade, max total {s.max_total_risk_pct}%, daily loss "
-        f"{s.max_daily_loss_pct}%, drawdown {s.max_drawdown_pct}%, min R:R {s.min_risk_reward}"
-    )
+    failures = 0
+    try:
+        print(f"{OK} database: {await check_database(s)}")
+    except Exception as exc:
+        failures += 1
+        print(f"{FAIL} database: {exc}")
+    try:
+        config = await load_config(s)
+    except Exception as exc:
+        print(f"{FAIL} configuration: could not read it from the database ({exc}); checking the environment only")
+        config = single_experiment(s)
+    g = config.settings
+    print(f"Mode: {g.trading_mode.value} · {len(config.enabled)} of {len(config.experiments)} experiment(s) enabled")
+    for e in config.experiments:
+        x = e.settings
+        print(
+            f"  {'●' if e.enabled else '○'} {e.slug} ({e.instrument}, {e.strategy}, model {x.openrouter_model}): "
+            f"{x.risk_per_trade_pct}%/trade, max open {x.max_total_risk_pct}%, daily loss {x.max_daily_loss_pct}%, "
+            f"drawdown {x.max_drawdown_pct}%, min R:R {x.min_risk_reward}, capital {e.summary()['capital'] or 'from the account'}"
+        )
+    active = config.enabled or config.experiments
 
     checks: list[tuple[str, Callable[[], Awaitable[str]]]] = [
-        ("database", lambda: check_database(s)),
-        ("capital.com", lambda: check_capital(s)),
-        ("openrouter", lambda: check_openrouter(s)),
-        ("calendar", lambda: check_calendar(s)),
-        ("rss", lambda: check_rss(s)),
-        ("telegram", lambda: check_telegram(s, args.telegram)),
+        ("capital.com", lambda: check_capital(g, active)),
+        ("openrouter", lambda: check_openrouter(g, [e.settings.openrouter_model for e in active])),
+        ("calendar", lambda: check_calendar(g, active)),
+        ("rss", lambda: check_rss(g)),
+        ("telegram", lambda: check_telegram(g, args.telegram)),
     ]
-    failures = 0
     for name, fn in checks:
         try:
             print(f"{OK} {name}: {await fn()}")

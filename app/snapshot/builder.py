@@ -11,12 +11,13 @@ from typing import Any
 
 from app.market_data.state import PriceTick
 from app.news.state import NewsState
-from app.strategy.trend_pullback import StrategyResult
+from app.strategy.base import StrategyResult
+from app.strategy.registry import SPEC_BY_SETUP
 from app.technicals.engine import TechnicalState, TimeframeState
 from app.technicals.levels import Level, sorted_by_distance
 from app.technicals.regime import MarketRegimeLabel
 
-SNAPSHOT_VERSION = "snapshot-v1"
+SNAPSHOT_VERSION = "snapshot-v2"
 TF_KEYS = {"H4": "4h", "H1": "1h", "M15": "15m"}
 
 
@@ -108,8 +109,10 @@ def build_snapshot(
         if market_regime is None
         else {
             "label": str(market_regime),
-            "suits_trend_pullback": market_regime
-            in (MarketRegimeLabel.STRONG_UPTREND, MarketRegimeLabel.STRONG_DOWNTREND),
+            # Whether this regime suits the experiment's setup (see app/strategy/registry.py).
+            "suits_setup": market_regime in SPEC_BY_SETUP[strategy.setup].suitable_regimes
+            if strategy.setup in SPEC_BY_SETUP
+            else None,
         },
         "regimes": {TF_KEYS[tf]: str(r) for tf, r in tech.trend_regimes.items()},
         "news": news.to_dict(),

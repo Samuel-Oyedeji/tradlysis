@@ -31,7 +31,8 @@ from app.db.models import (
 
 DECISION_BAR = timedelta(minutes=15)
 HYPOTHETICAL_HORIZON = timedelta(days=5)
-PIP = 0.0001  # V1 trades EUR/USD only
+PIP = 0.0001  # the pairs traded so far (EUR/USD, GBP/USD) quote in 0.0001 pips
+SETUP_LABELS = {"TREND_PULLBACK": "Trend-pullback", "RANGE_BREAKOUT": "Range-breakout"}
 
 # --------------------------------------------------------------------------- outcome
 
@@ -216,9 +217,10 @@ def build_timeline(chain: Chain, hypothetical: dict[str, Any] | None = None) -> 
                 ("Risk:reward", f"1:{plan.get('risk_reward')}"),
             ]
         nodes.append(_node(
-            "setup", "Trend-pullback setup " + ("found" if strat.get("candidate") else "not complete"),
+            "setup", f"{SETUP_LABELS.get(strat.get('setup'), 'Setup')} setup " + ("found" if strat.get("candidate") else "not complete"),
             "pass" if strat.get("candidate") else "fail", req.created_at,
-            (f"{strat.get('direction')} setup" if strat.get("direction") else "No higher-timeframe direction")
+            (f"{strat.get('direction')} setup" if strat.get("direction")
+             else "No breakout" if strat.get("setup") == "RANGE_BREAKOUT" else "No higher-timeframe direction")
             + ("" if strat.get("candidate") else f" · failed: {', '.join(strat.get('failure_codes', []))}"),
             plan_details, conds,
         ))
@@ -455,6 +457,7 @@ def item_summary(chain: Chain, hypothetical: dict[str, Any] | None) -> dict[str,
         "id": item_id(chain),
         "time": time.isoformat() if time else None,
         "direction": direction,
+        "instrument": (req.instrument if req else None) or (t.instrument if t else None),
         "category": "TRADED" if (t is not None and oc.category == "TRADED") else oc.category,
         "outcome": oc.code if t is None or not t.unexpected else "EXTERNAL",
         "label": oc.label if t is None or not t.unexpected else f"External trade · {oc.label}",
