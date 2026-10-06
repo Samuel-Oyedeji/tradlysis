@@ -1,6 +1,14 @@
 # Tradlysis – notes for AI assistants
 
 - Spec: V1 of an AI-assisted FX/CFD bot (EUR/USD, trend pullback, Capital.com demo account). See README.md.
+- Configuration: `.env` holds only bootstrap values (`app/config/store.py` `ENV_ONLY_KEYS`: DATABASE_URL, dashboard and
+  config passwords, TRADING_MODE/LIVE_TRADING_CONFIRM). Everything else is stored in `app_config` (global) and
+  `experiments.settings` (per experiment), edited on `/config`, and merged + validated by `Settings`. A new setting needs
+  a `FieldInfo` in `store.FIELDS` (global or experiment scope) to be editable. Never move the trading mode into the DB.
+- Experiments: several run in one engine on ONE broker account (`ExperimentRunner` per experiment in `app/engine.py`).
+  Each has its own risk pool (equity = capital + P/L of its own trades), breakers, kill switch and close-all, stored
+  as `control_state` keys `<key>:<slug>` (`app.db.control.scoped`). Orders belong to an experiment through
+  risk_check -> decision_request; trades carry `experiment`.
 - Broker access lives only in `app/broker/capital.py` (REST + WebSocket); services use the neutral types in
   `app/broker/types.py`. Tests run the real client against `tests/fake_broker.py` (httpx MockTransport).
 - Python 3.11 engine; Prisma is used ONLY for schema + migrations (`prisma/`). Python uses SQLAlchemy models in
