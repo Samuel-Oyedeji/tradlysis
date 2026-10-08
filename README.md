@@ -358,6 +358,15 @@ starts one (one at a time) and returns its progress; repeat the URL until `statu
 It reports trades per week, win rate, total and average R, profit factor, drawdown, what blocked
 the rest of the candles and the near misses.
 
+**Does the AI model help?** Tick *Also ask the decision model about every trade* (CLI `--model`, data API
+`&model=true`). For every trade the rules took, the backtester builds the exact snapshot the engine would
+have sent and asks the experiment's model (same prompt, model and settings: one OpenRouter call per trade,
+at most 600 per run). A trade counts as *taken* when the model confirms its direction with at least the
+experiment's minimum confidence. The report compares rules alone, the trades the model would have taken
+and the ones it would have skipped, overall and on the check period. Caveats: there is no historical news,
+so the model sees a quiet calendar; a trade the model skips would sometimes have freed the experiment for
+another setup, which the comparison ignores.
+
 **Out-of-sample check.** Every backtest is split in two: the *tuning* period (the first two-thirds)
 and the *check* period (the last third), plus results by quarter. Pick settings by their tuning
 results only, then look at the check column: a setting that was best on the tuning period and is

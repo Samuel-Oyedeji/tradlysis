@@ -374,3 +374,53 @@ async def test_candles_endpoint_feeds_an_offline_backtest(db, monkeypatch, tmp_p
     keep = ("cycles", "setups", "trades", "total_r")
     assert [{k: r[k] for k in keep} for r in offline["runs"]] == [{k: r[k] for k in keep} for r in online["runs"]]
     assert offline["runs"][0]["trades"] == 1 and offline["runs"][0]["total_r"] == 2.0
+
+
+async def test_model_evaluation_splits_trades_into_taken_and_skipped(monkeypatch):
+    from app.decision.service import DecisionOutcome, DecisionService
+
+    monkeypatch.setattr(engine_mod, "evaluate_strategy", fake_strategy({at(10, 30): "BUY", at(12): "BUY"}))
+    h = history(spike_at=at(11))  # the 10:30 BUY reaches its target (+2R)
+    crash = next(b for b in h.bars["M15"] if b.time == at(12, 30))
+    crash.low = P - 0.0030  # the 12:00 BUY is stopped (-1R)
+    broker = FakeBroker()
+    broker.candles = {g: h.bars[g] for g in ("M15", "H1", "H4")}
+    seen: list[dict] = []
+
+    async def decide(self, snapshot):
+        seen.append(snapshot)
+        first = snapshot["decision_time"].startswith("2026-09-08T10:30")
+        assert self.prompt.setup == "TREND_PULLBACK" and snapshot["setup_check"]["candidate"]
+        assert snapshot["news"]["risk"] == "low" and snapshot["pair"] == "EUR_USD"
+        return DecisionOutcome("LLM", "BUY" if first else "WAIT", "TREND_PULLBACK" if first else None,
+                               0.8 if first else 0.7, ["OTHER"], True)
+
+    monkeypatch.setattr(DecisionService, "decide", decide)
+    client = make_client(broker)
+    result = await bt.backtest(single_experiment(make_settings()), client, days=1, end=at(14), llm=object())
+    await client.aclose()
+    assert len(seen) == 2
+    m = result["runs"][0]["model"]
+    assert (m["asked"], m["errors"], m["taken"]["trades"], m["skipped"]["trades"]) == (2, 0, 1, 1)
+    assert m["rules_only"]["total_r"] == pytest.approx(1.0) and m["taken"]["total_r"] == pytest.approx(2.0)
+    assert m["edge_per_trade_r"] == pytest.approx(3.0)
+    trades = result["runs"][0]["trade_list"]
+    assert trades[0]["model"] == {"decision": "BUY", "confidence": 0.8, "taken": True, "error": None}
+    assert trades[1]["model"]["taken"] is False
+    assert "model: asked about 2 trades (0 errors) · took 1" in bt.render(result)
+    # without a model nothing is asked and there is no model section
+    client = make_client(broker)
+    plain = await bt.backtest(single_experiment(make_settings()), client, days=1, end=at(14))
+    await client.aclose()
+    assert plain["runs"][0]["model"] is None and "model" not in plain["runs"][0]["trade_list"][0]
+
+
+def test_model_calls_are_capped_and_need_a_key():
+    run = run_for()
+    run.trades = [bt.SimTrade("BUY", at(10), 1.1, 1.098, 1.104, 1000, 0.00005, 20, snapshot={})
+                  for _ in range(bt.MAX_MODEL_CALLS + 1)]
+    with pytest.raises(ConfigError, match="at most"):
+        asyncio.run(bt.evaluate_model([run], object()))
+    with pytest.raises(ConfigError, match="OpenRouter"):
+        bt.make_llm(make_settings(openrouter_api_key=""))
+    assert bt.job_params([], 30, {}, {}, model=True)["model"] is True

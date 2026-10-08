@@ -34,6 +34,8 @@
   news). It must keep using the engine's own functions (`compute_technical_state`, `BARS_PER_TF`) so it tests what
   runs live; a new strategy needs nothing extra there. Served read-only at `/api/data/backtest`. Results are split
   into a tuning period (first 2/3) and a check period (last 1/3) plus quarters, so variants are judged out of sample.
+  With a model (`--model` / `model=true`) it asks the decision model about each rules-only trade via `build_snapshot`
+  (`evaluate_model`), so the model's value is measured, not assumed.
 - Bump a strategy's prompt version in `app/decision/prompts.py` (`PROMPT_VERSION` for trend pullback,
   `BREAKOUT_PROMPT_VERSION`, `TREND_PROMPT_VERSION`, `LONDON_PROMPT_VERSION`) whenever its prompt or questions change
   (`NEWS_PROMPT_VERSION` in `app/news/interpreter.py` for the news questions).
