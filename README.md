@@ -313,12 +313,18 @@ separate from the dashboard login, so you can hand it out and change it on its o
 ```bash
 curl -H "Authorization: Bearer $TOKEN" https://<your-host>/api/data/diagnose?days=7      # where cycles stop
 curl -H "Authorization: Bearer $TOKEN" https://<your-host>/api/data/tables               # tables, columns, row counts
+curl -H "Authorization: Bearer $TOKEN" "https://<your-host>/api/data/candles?instrument=EUR_USD&granularity=M15&days=30"  # broker history
 curl -H "Authorization: Bearer $TOKEN" "https://<your-host>/api/data/tables/decision_requests?f.experiment=eurusd-breakout&since=2026-10-06T00:00:00Z&limit=200&columns=candle_time,strategy_result"
 ```
 
 Rows: `limit` (max 1000) and `offset` (`has_more` says whether to page on), `order=column` or
 `-column`, `columns=a,b`, `since`/`until` on the table's time column, and `f.<column>=<value>`
 filters (`null` matches empty). `python -m app.diagnose` prints the same diagnosis locally.
+
+`/api/data/candles` returns complete broker candles (M15, H1, H4, D or W; up to 500 days). Saved as
+`<INSTRUMENT>_<GRANULARITY>.json` files, they feed `app.backtest.CandleFileClient`, which stands in for
+the broker: a new strategy can then be backtested on real history on a machine that cannot reach
+Capital.com, before it is deployed.
 
 ### Backtester (`/backtest` page, or `python -m app.backtest`)
 

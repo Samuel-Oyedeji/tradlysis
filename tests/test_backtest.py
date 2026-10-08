@@ -332,3 +332,42 @@ def test_out_of_sample_periods_and_selection():
     sel = bt.selection([summary("a", 5, 4), summary("b", 2, 3)])
     assert sel[0]["outcome"] == "holds" and sel[0]["check_rank"] == 1
     assert bt.selection([summary("a", 5, 1), summary("b", 2, 3)])[0]["outcome"] == "mixed"
+
+
+async def test_candles_endpoint_feeds_an_offline_backtest(db, monkeypatch, tmp_path):
+    import json as _json
+
+    from app.api.main import create_app
+    from app.config import store
+
+    token = "t" * 32
+    base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
+    await store.save_global(db, base, {"data_api_token": token}, "test")
+    h = history(spike_at=at(11))
+    broker = FakeBroker()
+    end = h.bars["M15"][-1].time + timedelta(minutes=15)
+    broker.candles = {g: h.bars[g] for g in ("M15", "H1", "H4")}
+    monkeypatch.setattr(bt, "make_client", lambda settings, experiments: make_client(broker))
+    monkeypatch.setattr("app.market_data.timeutil.utcnow", lambda: end)
+    app = create_app(base, db=db)
+    app.state.db = db
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        assert (await c.get("/api/data/candles?instrument=EUR_USD")).status_code == 401
+        assert (await c.get("/api/data/candles?instrument=eurusd", headers=headers)).status_code == 422
+        for g in ("M15", "H1", "H4"):
+            r = await c.get(f"/api/data/candles?instrument=EUR_USD&granularity={g}&days=60", headers=headers)
+            assert r.status_code == 200, r.text
+            payload = r.json()
+            assert payload["info"]["name"] == "EUR_USD" and payload["count"] == len(payload["candles"]) > 0
+            (tmp_path / f"EUR_USD_{g}.json").write_text(_json.dumps(payload))
+
+    monkeypatch.setattr(engine_mod, "evaluate_strategy", fake_strategy({at(10, 30): "BUY"}))
+    offline = await bt.backtest(single_experiment(make_settings()), bt.CandleFileClient(str(tmp_path)),
+                                days=1, end=at(14))
+    live = make_client(broker)
+    online = await bt.backtest(single_experiment(make_settings()), live, days=1, end=at(14))
+    await live.aclose()
+    keep = ("cycles", "setups", "trades", "total_r")
+    assert [{k: r[k] for k in keep} for r in offline["runs"]] == [{k: r[k] for k in keep} for r in online["runs"]]
+    assert offline["runs"][0]["trades"] == 1 and offline["runs"][0]["total_r"] == 2.0

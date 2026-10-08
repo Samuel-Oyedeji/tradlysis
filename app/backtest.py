@@ -701,6 +701,58 @@ def make_client(settings: Settings, experiments: list[ExperimentConfig]) -> Any:
     )
 
 
+class CandleFileClient:
+    """Stands in for the broker with candles saved from ``GET /api/data/candles`` (one JSON file per
+    instrument and granularity, named ``<INSTRUMENT>_<GRANULARITY>.json``), so a strategy can be
+    backtested on real history where the broker cannot be reached. Account currency: USD."""
+
+    def __init__(self, directory: str, currency: str = "USD") -> None:
+        from pathlib import Path
+
+        self.dir = Path(directory)
+        self.currency = currency
+        self._cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _load(self, instrument: str, granularity: str) -> dict[str, Any] | None:
+        key = (instrument, granularity)
+        if key not in self._cache:
+            path = self.dir / f"{instrument}_{granularity}.json"
+            self._cache[key] = json.loads(path.read_text()) if path.exists() else None  # type: ignore[assignment]
+        return self._cache[key]
+
+    def register_market(self, instrument: str, epic: str = "") -> str:
+        return epic or instrument.replace("_", "")
+
+    async def get_account(self) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(currency=self.currency)
+
+    async def get_instrument(self, instrument: str | None = None) -> InstrumentInfo:
+        data = next((d for g in ("M15", "H1", "H4", "D", "W") if (d := self._load(instrument or "", g))), None)
+        if data is None:
+            raise ConfigError(f"no saved candles for {instrument} in {self.dir}")
+        return InstrumentInfo(**data["info"])
+
+    async def get_candles_between(
+        self, granularity: str, start: datetime, end: datetime, instrument: str | None = None,
+        problems: list[str] | None = None,
+    ) -> list[Bar]:
+        from app.market_data.timeutil import parse_time
+
+        data = self._load(instrument or "", granularity)
+        if data is None:
+            return []
+        bars = [Bar(parse_time(t), o, h, lo, c, 0, True, bc, ac) for t, o, h, lo, c, bc, ac in data["candles"]]
+        return [b for b in bars if start <= b.time < end]
+
+    async def get_conversion_rate(self, currency: str, account_currency: str) -> float | None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
 # ---------------------------------------------------------------------- jobs (dashboard + data API)
 
 
