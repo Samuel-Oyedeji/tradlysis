@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Backtest · Tradlysis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+<style>
+.exps { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+.exp-chip { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; cursor: pointer; background: var(--panel); min-height: 40px; }
+.exp-chip:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.exp-chip input { width: 16px; height: 16px; margin: 0; }
+.exp-chip b { font-size: 13px; } .exp-chip span { font: 12px var(--mono); color: var(--ink-3); }
+.change { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) auto; gap: 8px; align-items: start; margin-bottom: 8px; }
+.change select.inp { font-family: var(--sans); }
+.change .cur { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); margin-top: -4px; }
+.change .rm { min-height: 38px; padding: 0 10px; }
+@media (max-width: 899px) { .change { grid-template-columns: minmax(0, 1fr) auto; } .change .vals { grid-column: 1 / 2; } }
+.progress { display: flex; align-items: center; gap: 8px; }
+.spin { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.run { margin-top: 16px; }
+.run .panel-h h2 { font-size: 14px; }
+.run .panel-h .pair { font: 600 12px var(--mono); color: var(--ink-3); white-space: nowrap; }
+.chg { display: inline-block; white-space: nowrap; font: 600 11px var(--mono); padding: 1px 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2); margin: 2px 4px 0 0; }
+.reading { margin: 0 16px 14px; padding: 10px 12px; border-radius: 8px; background: var(--panel-2); border-left: 3px solid var(--ink-3); font-size: 13px; }
+.reading.good { border-left-color: var(--good); color: var(--ink); } .reading.bad { border-left-color: var(--bad); color: var(--ink); } .reading.warn { border-left-color: var(--warn); color: var(--ink); }
+.run .tiles { padding: 14px 16px 0; gap: 12px; }
+.run .tile { border: 1px solid var(--grid); border-radius: 8px; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0; border-top: 1px solid var(--grid); margin-top: 14px; }
+.cols > div { padding: 12px 16px; min-width: 0; }
+.cols > div + div { border-left: 1px solid var(--grid); }
+@media (max-width: 899px) { .cols { grid-template-columns: minmax(0, 1fr); } .cols > div + div { border-left: 0; border-top: 1px solid var(--grid); } }
+.sub { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 8px; }
+.bars { display: grid; gap: 6px; }
+.bar { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 10px; align-items: center; font-size: 12px; }
+.bar .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar .track { grid-column: 1 / -1; height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; margin-top: -3px; }
+.bar .fill { height: 100%; background: var(--ink-3); border-radius: 3px; }
+.bar .fill.near { background: var(--accent); }
+.bar .n { text-align: right; font-family: var(--mono); color: var(--ink-2); }
+.curve { padding: 0 16px 6px; }
+.curve svg { width: 100%; height: 130px; display: block; }
+.trades { padding: 0 16px 14px; }
+.cmp td.best { font-weight: 700; }
+.savebar { position: static; }
+.recent-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="side" id="side"></aside>
+  <div>
+    <header class="topbar" id="topbar"></header>
+    <main class="main">
+      <div class="page-h"><h1>Backtest</h1><span class="muted">Replay history through an experiment's rules</span></div>
+      <div class="note">Replays months of real Capital.com candles through each experiment's strategy rules and its risk
+        limits, with its capital as a simulated account, and shows what it would have traded. Nothing is traded or saved.
+        Read the results as a best case: every setup counts as if the model agreed, there is no news blackout, and a
+        15-minute candle that touches both the stop and the target counts as a loss.</div>
+
+      <section class="panel" aria-labelledby="form-h">
+        <div class="panel-h"><h2 id="form-h">Run a backtest</h2></div>
+        <div class="field">
+          <label>Experiments</label>
+          <div><div class="exps" id="exps"><span class="muted">Loading…</span></div></div>
+        </div>
+        <div class="field">
+          <label>Period</label>
+          <div><div class="seg" id="days" role="group" aria-label="Period">
+            <button type="button" data-days="30">30 days</button><button type="button" data-days="90" aria-pressed="true">90 days</button><button type="button" data-days="180">6 months</button><button type="button" data-days="365">1 year</button>
+          </div><div class="help">Longer periods give more trades to judge by; one year takes a few minutes.</div></div>
+        </div>
+        <div class="field">
+          <label>Change settings <span class="env">optional</span></label>
+          <div>
+            <div id="changes"></div>
+            <button type="button" class="linkbtn" id="add-change">+ Change a setting</button>
+            <div class="help">One value tries it for this run only (nothing is saved). Several values separated by commas,
+              e.g. <span class="mono">1,2</span>, compare them side by side: every combination, up to 12.</div>
+          </div>
+        </div>
+        <div class="savebar">
+          <div class="msg" id="msg" role="status" aria-live="polite"></div>
+          <button type="button" class="btn primary" id="run">Run backtest</button>
+        </div>
+      </section>
+
+      <div id="results"></div>
+
+      <section class="panel" style="margin-top:16px" aria-labelledby="recent-h">
+        <div class="panel-h"><h2 id="recent-h">Recent runs</h2><span class="aside">kept until the dashboard restarts</span></div>
+        <div class="panel-b flush" id="recent"><div class="empty">None yet.</div></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="/assets/app.js"></script>
+<script>
+const {esc, fmt, dt, pretty, signed, api, pair} = T;
+const $ = (id) => document.getElementById(id);
+T.renderShell("backtest");
+T.refreshStatus();
+
+let opts = null, days = 90, polling = null, shown = null;
+const expName = (slug) => (opts?.experiments.find(e => e.slug === slug) || {}).name || slug;
+const settingLabel = (key) => (opts?.settings.find(s => s.key === key) || {}).label || pretty(key);
+
+// ------------------------------------------------------------------ form
+
+function selectedExps() {
+  return [...document.querySelectorAll("#exps input:checked")].map(i => i.value);
+}
+
+function renderExps() {
+  const list = opts.experiments;
+  $("exps").innerHTML = list.length ? list.map(e => `<label class="exp-chip"><input type="checkbox" value="${esc(e.slug)}" ${e.enabled ? "checked" : ""}>
+    <b>${esc(e.name)}</b><span>${esc(pair(e.instrument))} · ${esc(pretty(e.strategy))}${e.enabled ? "" : " · off"}</span></label>`).join("")
+    : `<span class="muted">No experiments yet. <a href="/config">Create one on the Config page.</a></span>`;
+  $("exps").onchange = () => document.querySelectorAll(".change").forEach(updateCurrent);
+}
+
+function settingOptions(selected) {
+  const exps = selectedExps().map(s => opts.experiments.find(e => e.slug === s)).filter(Boolean);
+  const strategies = new Set(exps.map(e => e.strategy));
+  const groups = {};
+  for (const s of opts.settings) {
+    if (s.strategies.length && strategies.size && !s.strategies.some(x => strategies.has(x))) continue;
+    (groups[s.group] = groups[s.group] || []).push(s);
+  }
+  return `<option value="">Choose a setting…</option>` + Object.entries(groups).map(([g, list]) =>
+    `<optgroup label="${esc(g)}">${list.map(s => `<option value="${esc(s.key)}" ${s.key === selected ? "selected" : ""}>${esc(s.label)}</option>`).join("")}</optgroup>`).join("");
+}
+
+function updateCurrent(row) {
+  const key = row.querySelector("select").value;
+  const cur = row.querySelector(".cur");
+  if (!key) { cur.textContent = ""; return; }
+  const s = opts.settings.find(x => x.key === key);
+  const vals = selectedExps().map(slug => {
+    const e = opts.experiments.find(x => x.slug === slug);
+    return e && e.values[key] !== undefined ? `${e.name}: ${e.values[key]}` : null;
+  }).filter(Boolean);
+  cur.textContent = (vals.length ? `Now ${vals.join(" · ")}. ` : "") + (s?.help || "");
+}
+
+function addChange(key = "", value = "") {
+  const row = document.createElement("div");
+  row.className = "change";
+  row.innerHTML = `<select class="inp" aria-label="Setting">${settingOptions(key)}</select>
+    <input class="inp vals" aria-label="Value or values" placeholder="e.g. 1.5 or 1,2" value="${esc(value)}" inputmode="decimal" autocomplete="off">
+    <button type="button" class="btn rm" aria-label="Remove">✕</button><div class="cur"></div>`;
+  row.querySelector("select").onchange = () => updateCurrent(row);
+  row.querySelector(".rm").onclick = () => row.remove();
+  $("changes").appendChild(row);
+  updateCurrent(row);
+  if (!key) row.querySelector("select").focus();
+}
+
+function formParams() {
+  const set = {}, vary = {};
+  for (const row of document.querySelectorAll(".change")) {
+    const key = row.querySelector("select").value;
+    const raw = row.querySelector(".vals").value.trim();
+    if (!key && !raw) continue;
+    if (!key) throw new Error("Choose which setting to change, or remove the empty row.");
+    if (!raw) throw new Error(`Enter a value for ${settingLabel(key)}.`);
+    if (key in set || key in vary) throw new Error(`${settingLabel(key)} is listed twice.`);
+    const values = raw.split(",").map(v => v.trim()).filter(Boolean);
+    if (values.length > 1) vary[key] = values.join(","); else set[key] = values[0];
+  }
+  const experiments = selectedExps();
+  if (!experiments.length) throw new Error("Pick at least one experiment.");
+  return {experiments, days, set, vary};
+}
+
+document.querySelectorAll("#days button").forEach(b => b.onclick = () => {
+  days = Number(b.dataset.days);
+  document.querySelectorAll("#days button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+});
+$("add-change").onclick = () => { if (opts) addChange(); };
+
+function busy(on, text) {
+  $("run").disabled = on;
+  $("msg").innerHTML = on ? `<span class="progress"><span class="spin" aria-hidden="true"></span>${esc(text || "Running…")}</span>` : esc(text || "");
+}
+
+$("run").onclick = async () => {
+  let body;
+  try { body = formParams(); } catch (e) { $("msg").innerHTML = `<span class="bad">${esc(e.message)}</span>`; return; }
+  busy(true, "Starting…");
+  try {
+    const job = await api("/api/backtest", {method: "POST", body: JSON.stringify(body)});
+    follow(job);
+  } catch (e) {
+    busy(false);
+    $("msg").innerHTML = `<span class="bad">${esc(e.status === 409 ? "Another backtest is running. Wait for it to finish." : e.detail || e.message)}</span>`;
+  }
+};
+
+function follow(job) {
+  clearTimeout(polling);
+  if (job.status === "running") {
+    busy(true, progressText(job));
+    polling = setTimeout(async () => {
+      try { follow(await api(`/api/backtest/${job.id}`)); }
+      catch (e) { busy(false); $("msg").innerHTML = `<span class="bad">Lost track of the run: ${esc(e.message)}</span>`; }
+    }, 2000);
+    return;
+  }
+  busy(false);
+  loadRecent();
+  if (job.status === "failed") { $("msg").innerHTML = `<span class="bad">Backtest failed: ${esc(job.error)}</span>`; return; }
+  $("msg").innerHTML = `<span class="good">Done</span> · started ${esc(dt(job.started_at))}`;
+  show(job);
+}
+
+function progressText(job) {
+  const secs = Math.round((Date.now() - new Date(job.started_at)) / 1000);
+  const p = job.progress || "running";
+  return `${p.replace(/^([A-Z]{3})_([A-Z]{3})/, "$1/$2")} · ${secs}s`;
+}
+
+// ------------------------------------------------------------------ results
+
+function verdict(r) {
+  const top = Object.keys(r.rule_failures)[0];
+  if (!r.trades) return ["bad", `No trades in ${r.cycles} candles. ${top ? `The rule that blocked most often: ${pretty(top)}.` : ""} Try a longer period or loosen that rule.`];
+  if (r.closed < 10) return ["warn", `Only ${r.closed} closed trade${r.closed === 1 ? "" : "s"}: too few to judge. Try a longer period.`];
+  if (r.total_r > 0 && (r.profit_factor ?? 99) >= 1.3) return ["good", `Promising: ${fmt(r.closed, 0)} trades made ${fmt(r.total_r, 1)}R, a profit factor of ${fmt(r.profit_factor)}. Compare it with the live results once it trades.`];
+  if (r.total_r > 0) return ["warn", `Slightly positive (${fmt(r.total_r, 1)}R over ${r.closed} trades, profit factor ${fmt(r.profit_factor)}): not clearly better than chance yet.`];
+  return ["bad", `Lost ${fmt(-r.total_r, 1)}R over ${r.closed} trades (profit factor ${fmt(r.profit_factor)}). The rules as set have no edge over this period.`];
+}
+
+function changes(variant) {
+  const e = Object.entries(variant || {});
+  return e.length ? e.map(([k, v]) => `<span class="chg">${esc(settingLabel(k))} = ${esc(v)}</span>`).join("") : "";
+}
+
+function tile(label, value, foot) {
+  return `<div class="tile"><div class="label">${esc(label)}</div><div class="value">${value}</div><div class="foot">${foot}</div></div>`;
+}
+
+// total: show each as a share of it; null: show counts, bars relative to the largest.
+function bars(counts, total, cls = "") {
+  const entries = Object.entries(counts || {}).slice(0, 6);
+  if (!entries.length) return `<div class="muted" style="font-size:12px">None</div>`;
+  const max = Math.max(...entries.map(([, n]) => n));
+  return `<div class="bars">${entries.map(([k, n]) => {
+    const pct = total ? n / total * 100 : n / max * 100;
+    const label = total ? `${fmt(pct, 0)}%` : `${fmt(n, 0)}×`;
+    return `<div class="bar"><span class="lbl" title="${esc(k)}">${esc(pretty(k))}</span><span class="n">${label}</span>
+      <div class="track"><div class="fill ${cls}" style="width:${Math.min(100, pct).toFixed(1)}%"></div></div></div>`;
+  }).join("")}</div>`;
+}
+
+function curve(trades) {
+  const closed = trades.filter(t => t.outcome !== "OPEN");
+  if (closed.length < 2) return "";
+  let cum = 0;
+  const pts = [0, ...closed.map(t => (cum += t.r))];
+  const W = 600, H = 130, pad = 8;
+  const lo = Math.min(0, ...pts), hi = Math.max(0, ...pts), span = hi - lo || 1;
+  const x = (i) => pad + i * (W - 2 * pad) / (pts.length - 1);
+  const y = (v) => pad + (hi - v) * (H - 2 * pad) / span;
+  const line = pts.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const end = pts[pts.length - 1];
+  return `<div class="curve"><div class="sub">Cumulative R, trade by trade</div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Cumulative result: ${fmt(end, 1)}R after ${closed.length} trades">
+      <line x1="${pad}" x2="${W - pad}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>
+      <path d="${line}" fill="none" stroke="${end >= 0 ? "var(--good)" : "var(--bad)"}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+    </svg></div>`;
+}
+
+function tradeTable(list) {
+  if (!list.length) return "";
+  return `<details class="trades"><summary>All ${list.length} trades</summary><div class="scroll-x" style="margin-top:8px">
+    <table class="t"><thead><tr><th>Opened (UTC)</th><th>Side</th><th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th><th class="num">Stop pips</th><th>Result</th><th class="num">R</th><th class="num">P/L</th><th class="num">Best / worst</th></tr></thead>
+    <tbody>${list.map(t => `<tr><td class="mono">${esc(t.opened.slice(0, 16).replace("T", " "))}</td><td>${esc(t.direction)}</td>
+      <td class="num">${t.entry}</td><td class="num">${t.stop_loss}</td><td class="num">${t.take_profit}</td><td class="num">${fmt(t.risk_pips, 1)}</td>
+      <td>${t.outcome === "OPEN" ? '<span class="muted">still open</span>' : esc(pretty(t.outcome))}${t.ambiguous ? ' <span class="muted" title="stop and target in the same candle">*</span>' : ""}</td>
+      <td class="num">${t.outcome === "OPEN" ? "–" : signed(t.r, 2, "R")}</td><td class="num">${t.outcome === "OPEN" ? "–" : signed(t.pnl)}</td>
+      <td class="num">${fmt(t.best_r, 1)} / ${fmt(t.worst_r, 1)}</td></tr>`).join("")}</tbody></table></div></details>`;
+}
+
+function runCard(r, cur) {
+  const [tone, text] = verdict(r);
+  const winRate = r.win_rate == null ? "–" : `${fmt(r.win_rate * 100, 0)}%`;
+  return `<section class="panel run">
+    <div class="panel-h"><div><h2>${esc(expName(r.experiment))}</h2>${changes(r.variant)}</div><span class="pair">${esc(pair(r.instrument))} · ${esc(pretty(r.strategy))}</span></div>
+    <section class="tiles" aria-label="Results">
+      ${tile("Trades", fmt(r.trades, 0), `${fmt(r.trades_per_week, 1)} a week · ${r.setups} setups`)}
+      ${tile("Win rate", winRate, r.closed ? `${r.wins} won · ${r.losses} lost` : "no closed trades")}
+      ${tile("Total R", r.closed ? signed(r.total_r, 1, "R") : "–", r.closed ? `avg ${r.avg_r > 0 ? "+" : ""}${fmt(r.avg_r)}R a trade` : "")}
+      ${tile("Profit factor", r.profit_factor == null ? (r.closed ? "∞" : "–") : fmt(r.profit_factor), `max drawdown ${fmt(r.max_drawdown_r, 1)}R`)}
+    </section>
+    <div class="reading ${tone}" style="margin-top:14px">${esc(text)}${r.closed ? ` On ${fmt(r.capital, 0)} ${esc(cur)} at ${fmt(r.risk_per_trade_pct)}% risk: ${signed(r.pnl)} (${r.return_pct > 0 ? "+" : ""}${fmt(r.return_pct)}%).` : ""}</div>
+    ${curve(r.trade_list)}
+    <div class="cols">
+      <div><div class="sub">Rules that blocked (share of ${fmt(r.cycles, 0)} candles)</div>${bars(r.rule_failures, r.cycles)}</div>
+      <div><div class="sub">Near misses: candles where only this rule failed</div>${bars(r.near_misses, null, "near")}
+        ${Object.keys(r.risk_blocks).length ? `<div class="sub" style="margin-top:14px">Setups the risk engine refused (share of ${r.setups})</div>${bars(r.risk_blocks, r.setups)}` : ""}
+        ${r.breaker_trips.length ? `<div class="sub" style="margin-top:14px">Loss breakers</div><div class="codes">${r.breaker_trips.map(esc).join("<br>")}</div>` : ""}
+      </div>
+    </div>
+    ${tradeTable(r.trade_list)}
+  </section>`;
+}
+
+function comparison(runs) {
+  if (runs.length < 2) return "";
+  const best = Math.max(...runs.map(r => r.closed ? r.total_r : -Infinity));
+  return `<section class="panel run"><div class="panel-h"><h2>Side by side</h2><span class="aside">best total R in bold</span></div>
+    <div class="scroll-x"><table class="t cmp"><thead><tr><th>Run</th><th class="num">Trades</th><th class="num">/ week</th><th class="num">Win rate</th><th class="num">Total R</th><th class="num">Avg R</th><th class="num">Profit factor</th><th class="num">Max DD</th><th class="num">P/L</th></tr></thead>
+    <tbody>${runs.map(r => `<tr><td><b>${esc(expName(r.experiment))}</b><div>${changes(r.variant) || '<span class="muted" style="font-size:12px">current settings</span>'}</div></td>
+      <td class="num">${r.trades}</td><td class="num">${fmt(r.trades_per_week, 1)}</td><td class="num">${r.win_rate == null ? "–" : fmt(r.win_rate * 100, 0) + "%"}</td>
+      <td class="num ${r.closed && r.total_r === best ? "best" : ""}">${r.closed ? signed(r.total_r, 1, "R") : "–"}</td><td class="num">${r.avg_r == null ? "–" : signed(r.avg_r, 2, "R")}</td>
+      <td class="num">${r.profit_factor == null ? "–" : fmt(r.profit_factor)}</td><td class="num">${fmt(r.max_drawdown_r, 1)}R</td><td class="num">${r.closed ? signed(r.pnl) : "–"}</td></tr>`).join("")}</tbody></table></div></section>`;
+}
+
+function show(job) {
+  const res = job.result;
+  if (!res) return;
+  shown = job.id;
+  const hist = Object.entries(res.history || {}).map(([inst, tfs]) => {
+    const m = tfs.M15 || {};
+    return `${pair(inst)}: ${fmt(m.candles, 0)} fifteen-minute candles from ${m.first ? new Date(m.first).toLocaleDateString() : "–"}`;
+  }).join(" · ");
+  $("results").innerHTML = `<div class="page-h" style="margin-top:20px"><h1 style="font-size:17px">Results</h1>
+      <span class="muted">${esc(new Date(res.start).toLocaleDateString())} – ${esc(new Date(res.end).toLocaleDateString())} (${res.days} days)</span></div>
+    ${hist ? `<div class="muted" style="font-size:12px">${esc(hist)}</div>` : ""}
+    ${comparison(res.runs)}${res.runs.map(r => runCard(r, res.account_currency)).join("")}`;
+  document.querySelectorAll("#recent [data-job]").forEach(el => el.setAttribute("aria-current", String(el.dataset.job === shown)));
+}
+
+// ------------------------------------------------------------------ recent runs
+
+function describe(p) {
+  const exps = p.experiment.length ? p.experiment.map(expName).join(", ") : "all enabled experiments";
+  const ch = [...Object.entries(p.set).map(([k, v]) => `${settingLabel(k)} = ${v}`),
+              ...Object.entries(p.vary).map(([k, v]) => `${settingLabel(k)}: ${v.join(" vs ")}`)];
+  return `${exps} · ${p.days} days${ch.length ? " · " + ch.join(", ") : ""}`;
+}
+
+async function loadRecent(first = false) {
+  try { opts = await api("/api/backtest/options"); } catch (e) { $("recent").innerHTML = `<div class="empty">Could not load: ${esc(e.message)}</div>`; return; }
+  const list = opts.recent;
+  $("recent").innerHTML = list.length ? `<table class="t"><tbody>${list.map(j => {
+    const sum = (j.summary || []).map(s => `${s.trades} trades ${s.total_r > 0 ? "+" : ""}${fmt(s.total_r, 1)}R`).join(" · ");
+    const state = j.status === "running" ? '<span class="dot d-warn"></span> running' : j.status === "failed" ? `<span class="bad">failed</span>` : esc(sum);
+    return `<tr class="${j.status === "done" ? "click" : ""}" data-job="${esc(j.id)}" tabindex="${j.status === "done" ? 0 : -1}"><td class="mono">${esc(dt(j.started_at))}</td><td>${esc(describe(j.params))}</td><td class="num">${state}</td></tr>`;
+  }).join("")}</tbody></table>` : `<div class="empty">None yet.</div>`;
+  document.querySelectorAll("#recent tr.click").forEach(el => {
+    const open = async () => { const job = await api(`/api/backtest/${el.dataset.job}`); show(job); $("results").scrollIntoView({behavior: "smooth"}); };
+    el.onclick = open; el.onkeydown = (ev) => { if (ev.key === "Enter") open(); };
+  });
+  if (first) {
+    renderExps();
+    const running = list.find(j => j.status === "running");
+    if (running) follow(await api(`/api/backtest/${running.id}`));
+    else { const last = list.find(j => j.status === "done"); if (last) show(await api(`/api/backtest/${last.id}`)); }
+  }
+}
+
+loadRecent(true);
+</script>
+</body>
+</html>

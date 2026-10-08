@@ -4,7 +4,8 @@ Authenticated with ``Authorization: Bearer <DATA_API_TOKEN>`` (set on the Config
 switches the API off), separately from the dashboard login.
 
 Guarantees:
-  * read-only: only GET routes, and every query runs in a READ ONLY transaction;
+  * read-only: only GET routes, and every query runs in a READ ONLY transaction (a backtest reads
+    candles from the broker and writes nothing anywhere);
   * only the bot's tables (``app/db/models.py``), never other tables in the shared database;
     there is deliberately no raw-SQL endpoint;
   * secrets are masked: ``app_config`` values of secret settings are never returned.
@@ -14,10 +15,15 @@ Routes:
   GET /api/data/tables/{table}          rows: ?limit=&offset=&order=-created_at&columns=a,b
                                         &since=&until= (on the table's time column) &f.<column>=<value>
   GET /api/data/diagnose?days=7         where each experiment's decision cycles stop (app/diagnose.py)
+  GET /api/data/backtest                replay history through experiments' rules (app/backtest.py):
+                                        ?experiment=<slug>&days=90&set.<key>=<v>&vary.<key>=<v1,v2>&wait=50
+                                        Starts the run (one at a time) or returns its progress / result;
+                                        repeat the same URL until "status" is "done".
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from collections.abc import Awaitable, Callable
@@ -28,6 +34,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from sqlalchemy import Table, Text, cast, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.backtest import BacktestJobs
 from app.config.settings import Settings
 from app.config.store import SECRET_KEYS, SECRET_MASK, Configuration
 from app.db.models import Base
@@ -62,6 +69,7 @@ def build_router(
     base: Settings,
     get_db: Callable[[Request], Database],
     load_config: Callable[[Database], Awaitable[Configuration]],
+    jobs: BacktestJobs,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/data", tags=["data"])
 
@@ -149,5 +157,37 @@ def build_router(
 
         db = get_db(request)
         return {"days": days, "text": await diagnosis(db, base, days)}
+
+    @router.get("/backtest", dependencies=[Depends(require_token)])
+    async def backtest(
+        request: Request,
+        experiment: list[str] | None = Query(None),
+        days: int = Query(90),
+        trades: bool = Query(False, description="list every trade in the text"),
+        wait: float = Query(0, ge=0, le=55, description="seconds to wait for the result"),
+    ) -> dict[str, Any]:
+        from app import backtest as bt
+        from app.config.store import ConfigError
+
+        qp = request.query_params
+        try:
+            params = bt.job_params(
+                experiment, days,
+                {k[4:]: v for k, v in qp.items() if k.startswith("set.")},
+                {k[5:]: v for k, v in qp.items() if k.startswith("vary.")},
+            )
+        except ConfigError as exc:
+            raise HTTPException(400, str(exc)) from None
+        db = get_db(request)
+        try:
+            job = jobs.start(params, lambda: load_config(db))
+        except bt.BacktestBusy as exc:
+            raise HTTPException(429, str(exc)) from None
+        if wait and job.task and not job.task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(job.task), wait)
+            except TimeoutError:
+                pass
+        return _jsonable(job.view(trades=trades))
 
     return router

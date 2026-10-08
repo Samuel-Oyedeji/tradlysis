@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 
 from app.market_data.candles import Bar
-from app.market_data.timeutil import parse_time, utcnow
+from app.market_data.timeutil import GRANULARITY_SECONDS, parse_time, utcnow
 
 API_KEY = "test-api-key"
 IDENTIFIER = "bot@example.com"
@@ -50,6 +50,7 @@ class FakeBroker:
     order_posts: list[dict[str, Any]] = field(default_factory=list)
     close_requests: list[str] = field(default_factory=list)
     logins: int = 0
+    price_requests: int = 0
     token: str = ""
     next_id: int = 1000
 
@@ -233,7 +234,17 @@ class FakeBroker:
             g = RESOLUTION_TO_GRANULARITY[req.url.params["resolution"]]
             count = int(req.url.params["max"])
             assert count <= 1000
-            bars = self.candles.get(g, [])[-count:]
+            bars = self.candles.get(g, [])
+            if "from" in req.url.params:
+                lo, hi = parse_time(req.url.params["from"]), parse_time(req.url.params["to"])
+                # Like the real API: a range wider than ``max`` bars is refused.
+                if (hi - lo).total_seconds() >= count * GRANULARITY_SECONDS[g]:
+                    return httpx.Response(400, json={"errorCode": "error.invalid.max.daterange"})
+                bars = [b for b in bars if lo <= b.time <= hi]
+                if not bars:
+                    return httpx.Response(404, json={"errorCode": "error.prices.not-found"})
+            self.price_requests += 1
+            bars = bars[-count:]
             half = 0.00005
             return httpx.Response(200, json={"prices": [
                 {"snapshotTime": b.time.strftime("%Y-%m-%dT%H:%M:%S"),
