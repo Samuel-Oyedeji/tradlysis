@@ -126,6 +126,9 @@ FIELDS: tuple[FieldInfo, ...] = (
     _g("telegram_bot_token", "Telegram alerts", "Bot token", "From @BotFather. Empty = alerts off.", secret=True),
     _g("telegram_chat_id", "Telegram alerts", "Chat ID"),
     _g("alert_dedup_seconds", "Telegram alerts", "Repeat-alert window (s)", kind="number"),
+    _g("data_api_token", "Data API", "Read-only API token",
+       "Bearer token for /api/data (read-only access to the bot's tables, secrets masked). At least 24 "
+       "characters; empty = the data API is off.", secret=True),
     _g("decision_candle_delay_seconds", "Scheduling", "Wait after candle close (s)", kind="number"),
     _g("reconcile_interval_seconds", "Scheduling", "Reconciliation interval (s)", kind="number"),
     _g("account_snapshot_interval_seconds", "Scheduling", "Account snapshot interval (s)", kind="number"),
