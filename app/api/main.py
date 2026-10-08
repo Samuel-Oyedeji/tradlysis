@@ -1,8 +1,8 @@
 """FastAPI control plane and mobile dashboard.
 
-The API only reads the database and writes control flags and configuration. It never talks to
-the broker: the engine's executor remains the only component that submits orders (a "flatten"
-request is a flag the engine picks up).
+The API only reads the database and writes control flags and configuration. It talks to the broker
+only to download candles for a backtest (``/backtest``); the engine's executor remains the only
+component that submits orders (a "flatten" request is a flag the engine picks up).
 
 Experiment pages take ``?experiment=<slug>`` (default: the first enabled experiment). The config
 page (``/config``) additionally needs CONFIG_PASSWORD, which unlocks it for a while.
@@ -32,6 +32,7 @@ from sqlalchemy import Date, cast, desc, func, select
 
 from app.api import data as data_api
 from app.api import history
+from app.backtest import BacktestBusy, BacktestJobs, job_params
 from app.config import store
 from app.config.settings import Settings, get_settings
 from app.config.store import Configuration, ExperimentConfig, ExperimentInput
@@ -76,6 +77,19 @@ class KillSwitchBody(BaseModel):
 class ReasonBody(BaseModel):
     reason: str = Field(default="", max_length=200)
     experiment: str | None = None  # None: every position on the account
+
+
+class BacktestBody(BaseModel):
+    experiments: list[str] = Field(default_factory=list, max_length=20)  # empty: every enabled experiment
+    days: int = 90
+    set: dict[str, str] = Field(default_factory=dict)  # setting -> value for this run
+    vary: dict[str, str] = Field(default_factory=dict)  # setting -> "v1,v2" to compare
+
+
+# Experiment settings the backtest page offers to change: the ones the rules and the risk engine use
+# (not the model, news or execution settings, which a backtest does not simulate).
+BACKTEST_GROUPS = ("Strategy", "Trade filters", "Risk")
+BACKTEST_SKIP = {"min_decision_confidence", "max_slippage_pips", "max_margin_usage_pct"}
 
 
 class UnlockBody(BaseModel):
@@ -169,8 +183,12 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     async def get_config(database: Database = Depends(get_db)) -> Configuration:
         return await load_config(database)
 
+    # Backtests (dashboard page and data API share them: one runs at a time).
+    backtests = BacktestJobs()
+    app.state.backtests = backtests
+
     # Read-only data API for analysis tools (bearer token, not the dashboard login).
-    app.include_router(data_api.build_router(settings, get_db, load_config))
+    app.include_router(data_api.build_router(settings, get_db, load_config, backtests))
 
     async def get_experiment(
         experiment: str | None = Query(None, max_length=63), config: Configuration = Depends(get_config)
@@ -213,6 +231,10 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @app.get("/analysis", include_in_schema=False)
     async def analysis_page(_: str = Depends(require_auth)) -> FileResponse:
         return FileResponse(STATIC_DIR / "analysis.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/backtest", include_in_schema=False)
+    async def backtest_page(_: str = Depends(require_auth)) -> FileResponse:
+        return FileResponse(STATIC_DIR / "backtest.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/history", include_in_schema=False)
     @app.get("/history/{item_id}", include_in_schema=False)
@@ -815,6 +837,55 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     def check_experiment(config: Configuration, slug: str | None) -> None:
         if slug is not None and config.get(slug) is None:
             raise HTTPException(404, f"unknown experiment {slug!r}")
+
+    # ------------------------------------------------------------------ backtests
+
+    @app.get("/api/backtest/options")
+    async def backtest_options(
+        _: str = Depends(require_auth), config: Configuration = Depends(get_config)
+    ) -> dict[str, Any]:
+        """What the backtest page offers: experiments, the settings it can change, recent runs."""
+        fields = [
+            f for f in store.FIELDS
+            if f.scope == store.EXPERIMENT_SCOPE and f.group in BACKTEST_GROUPS and f.kind == "number"
+            and f.key not in BACKTEST_SKIP
+        ]
+        return {
+            "experiments": [
+                {**e.summary(), "values": {f.key: store.display_value(e.settings, f.key) for f in fields}}
+                for e in config.experiments
+            ],
+            "settings": [
+                {"key": f.key, "label": f.label, "help": f.help, "group": f.group, "strategies": list(f.strategies)}
+                for f in fields
+            ],
+            "recent": [j.view(result=False) for j in backtests.recent()],
+        }
+
+    @app.post("/api/backtest", dependencies=[Depends(require_csrf)])
+    async def start_backtest(
+        body: BacktestBody,
+        _: str = Depends(require_auth),
+        config: Configuration = Depends(get_config),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        for slug in body.experiments:
+            check_experiment(config, slug)
+        try:
+            params = job_params(body.experiments, body.days, body.set, body.vary)
+            job = backtests.start(params, lambda: load_config(database, fresh=True))
+        except store.ConfigError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except BacktestBusy as exc:
+            raise HTTPException(409, str(exc)) from None
+        return data_api._jsonable(job.view(text=False))
+
+    @app.get("/api/backtest/{job_id}")
+    async def backtest_job(job_id: str, _: str = Depends(require_auth)) -> dict[str, Any]:
+        job = backtests.get(job_id)
+        if job is None:
+            raise HTTPException(404, "unknown or expired backtest")
+        return data_api._jsonable(job.view(text=False))
 
     @app.post("/api/controls/kill-switch", dependencies=[Depends(require_csrf)])
     async def kill_switch(
