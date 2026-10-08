@@ -144,6 +144,20 @@ class Settings(BaseSettings):
     breakout_fresh_bars: int = 4  # earlier M15 candles that must not have closed beyond the edge
     breakout_stop_range_frac: float = 0.3  # stop this fraction of the range height back inside it
     breakout_target_range_mult: float = 1.0  # target: this many range heights beyond the edge
+    # Trend following (app/strategy/trend_following.py): 4h channel breakout with the 4h trend
+    trend_channel_bars: int = 20  # completed 4h candles that form the channel
+    trend_stop_atr: float = 1.5  # stop distance, in 4h ATR
+    trend_target_r: float = 2.5  # target, in multiples of the risk
+    trend_entry_window_minutes: int = 60  # act on a 4h signal within this long of the candle closing
+    # London breakout (app/strategy/session_breakout.py); hours are London time
+    session_range_start_hour: int = 0
+    session_range_end_hour: int = 8  # the overnight range ends (and entries start) at this hour
+    session_entry_end_hour: int = 12  # no new entries after this hour
+    session_min_range_atr: float = 1.5  # range height, in 1h ATR
+    session_max_range_atr: float = 6.0
+    session_buffer_atr: float = 0.1  # 15m close beyond the range, in 15m ATR
+    session_stop_range_frac: float = 0.5  # stop this fraction of the range height back inside it (0.5 = middle)
+    session_target_r: float = 2.0  # target, in multiples of the risk
 
     # --- News ------------------------------------------------------------------------
     news_calendar_url: str = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -221,6 +235,20 @@ class Settings(BaseSettings):
             raise ValueError("BREAKOUT_BUFFER_ATR and BREAKOUT_MIN_BODY_ATR must be >= 0")
         if not 0 < self.breakout_stop_range_frac <= 1.0 or self.breakout_target_range_mult <= 0:
             raise ValueError("Require 0 < BREAKOUT_STOP_RANGE_FRAC <= 1 and BREAKOUT_TARGET_RANGE_MULT > 0")
+        if not 5 <= self.trend_channel_bars <= 28:
+            raise ValueError("TREND_CHANNEL_BARS must be between 5 and 28")
+        if self.trend_stop_atr <= 0 or self.trend_target_r <= 0:
+            raise ValueError("TREND_STOP_ATR and TREND_TARGET_R must be > 0")
+        if not 15 <= self.trend_entry_window_minutes <= 240:
+            raise ValueError("TREND_ENTRY_WINDOW_MINUTES must be between 15 and 240")
+        if not 0 <= self.session_range_start_hour < self.session_range_end_hour < self.session_entry_end_hour <= 23:
+            raise ValueError("Require 0 <= SESSION_RANGE_START_HOUR < SESSION_RANGE_END_HOUR < SESSION_ENTRY_END_HOUR <= 23")
+        if self.session_entry_end_hour - self.session_range_end_hour > 7:
+            raise ValueError("The entry window (SESSION_RANGE_END_HOUR to SESSION_ENTRY_END_HOUR) can be at most 7 hours")
+        if not 0 < self.session_min_range_atr < self.session_max_range_atr:
+            raise ValueError("Require 0 < SESSION_MIN_RANGE_ATR < SESSION_MAX_RANGE_ATR")
+        if self.session_buffer_atr < 0 or not 0 < self.session_stop_range_frac <= 1.0 or self.session_target_r <= 0:
+            raise ValueError("Require SESSION_BUFFER_ATR >= 0, 0 < SESSION_STOP_RANGE_FRAC <= 1, SESSION_TARGET_R > 0")
         if self.trading_mode == TradingMode.LIVE and self.live_trading_confirm != LIVE_CONFIRM_PHRASE:
             raise ValueError(
                 "TRADING_MODE=live requires LIVE_TRADING_CONFIRM="

@@ -15,6 +15,8 @@ Routes:
   GET /api/data/tables/{table}          rows: ?limit=&offset=&order=-created_at&columns=a,b
                                         &since=&until= (on the table's time column) &f.<column>=<value>
   GET /api/data/diagnose?days=7         where each experiment's decision cycles stop (app/diagnose.py)
+  GET /api/data/candles                 broker price history: ?instrument=EUR_USD&granularity=M15&days=30
+                                        (complete candles, read from the broker; for testing strategies offline)
   GET /api/data/backtest                replay history through experiments' rules (app/backtest.py):
                                         ?experiment=<slug>&days=90&set.<key>=<v>&vary.<key>=<v1,v2>&wait=50
                                         Starts the run (one at a time) or returns its progress / result;
@@ -157,6 +159,43 @@ def build_router(
 
         db = get_db(request)
         return {"days": days, "text": await diagnosis(db, base, days)}
+
+    candles_lock = asyncio.Lock()
+
+    @router.get("/candles", dependencies=[Depends(require_token)])
+    async def candles(
+        request: Request,
+        instrument: str = Query(..., pattern=r"^[A-Z]{3}_[A-Z]{3}$"),
+        granularity: str = Query("M15", pattern=r"^(M15|H1|H4|D|W)$"),
+        days: int = Query(30, ge=1, le=500),
+    ) -> dict[str, Any]:
+        """Complete candles from the broker, in the form ``app.backtest.CandleFileClient`` reads back."""
+        from dataclasses import asdict
+        from datetime import timedelta
+
+        from app import backtest as bt
+        from app.market_data.timeutil import utcnow
+
+        if candles_lock.locked():
+            raise HTTPException(429, "another candle download is running; try again shortly")
+        async with candles_lock:
+            config = await load_config(get_db(request))
+            mine = [e for e in config.experiments if e.instrument == instrument]
+            client = bt.make_client(config.settings, mine or config.experiments)
+            try:
+                client.register_market(instrument, mine[0].settings.broker_epic if mine else "")
+                info = await client.get_instrument(instrument)
+                end = utcnow()
+                problems: list[str] = []
+                bars = await client.get_candles_between(granularity, end - timedelta(days=days), end, instrument, problems)
+            finally:
+                await client.aclose()
+        rows = [[b.time.isoformat(), b.open, b.high, b.low, b.close, b.bid_close, b.ask_close] for b in bars if b.complete]
+        return {
+            "instrument": instrument, "granularity": granularity, "info": asdict(info), "count": len(rows),
+            "problems": problems[:20], "columns": ["time", "open", "high", "low", "close", "bid_close", "ask_close"],
+            "candles": rows,
+        }
 
     @router.get("/backtest", dependencies=[Depends(require_token)])
     async def backtest(

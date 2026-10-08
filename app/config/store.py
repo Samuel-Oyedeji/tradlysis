@@ -76,6 +76,8 @@ class FieldInfo:
 
 _TP = ("trend_pullback",)
 _RB = ("range_breakout",)
+_TF = ("trend_following",)
+_LB = ("london_breakout",)
 
 
 def _g(key: str, group: str, label: str, help: str = "", **kw: Any) -> FieldInfo:
@@ -180,7 +182,29 @@ FIELDS: tuple[FieldInfo, ...] = (
        "0.3 = stop 30% of the range height back inside it.", kind="number", strategies=_RB),
     _e("breakout_target_range_mult", "Strategy", "Target (range heights)",
        "1.0 = the measured move: one range height beyond the edge.", kind="number", strategies=_RB),
-    _e("strategy_max_target_r", "Strategy", "Max target (R)", kind="number"),
+    _e("trend_channel_bars", "Strategy", "Channel length (4h candles)",
+       "The 4h close must break the high/low of this many earlier 4h candles (5-28).", kind="number", strategies=_TF),
+    _e("trend_stop_atr", "Strategy", "Stop (4h ATR)",
+       "Stop distance from the entry. 4h stops are wide: raise Max stop (pips) for this experiment.",
+       kind="number", strategies=_TF),
+    _e("trend_target_r", "Strategy", "Target (R)", "Take-profit in multiples of the risk.", kind="number",
+       strategies=_TF),
+    _e("trend_entry_window_minutes", "Strategy", "Entry window (min)",
+       "How long after the 4h candle closes the signal may still be taken (15-240).", kind="number", strategies=_TF),
+    _e("session_range_start_hour", "Strategy", "Range start (London hour)", "Overnight range from this hour.",
+       kind="number", strategies=_LB),
+    _e("session_range_end_hour", "Strategy", "Range end / entries from (London hour)", kind="number",
+       strategies=_LB),
+    _e("session_entry_end_hour", "Strategy", "Entries until (London hour)", "At most 7 hours after the range ends.",
+       kind="number", strategies=_LB),
+    _e("session_min_range_atr", "Strategy", "Min range height (1h ATR)", kind="number", strategies=_LB),
+    _e("session_max_range_atr", "Strategy", "Max range height (1h ATR)", kind="number", strategies=_LB),
+    _e("session_buffer_atr", "Strategy", "Break beyond the range (15m ATR)", kind="number", strategies=_LB),
+    _e("session_stop_range_frac", "Strategy", "Stop inside the range (fraction)",
+       "0.5 = the middle of the range; 1.0 = its other side.", kind="number", strategies=_LB),
+    _e("session_target_r", "Strategy", "Target (R)", "Take-profit in multiples of the risk.", kind="number",
+       strategies=_LB),
+    _e("strategy_max_target_r", "Strategy", "Max target (R)", kind="number", strategies=_TP + _RB),
     _e("openrouter_model", "Decision model", "Model", "Jev (typesafe/jev-1.13) or a chat model id."),
     _e("llm_call_policy", "Decision model", "When to call the model",
        "candidates_only: only when the rules find a setup. always: every 15 minutes.",
