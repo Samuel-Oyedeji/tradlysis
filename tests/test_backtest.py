@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -209,3 +210,69 @@ async def test_data_api_backtest(db, monkeypatch):
         assert r["params"]["set"] == {"min_risk_reward": "1.5"} and "Tradlysis backtest" in r["text"]
         again = (await c.get("/api/data/backtest?days=1&set.min_risk_reward=1.5", headers=headers)).json()
         assert again["started_at"] == r["started_at"], "a finished run is served again"
+
+
+async def test_jobs_run_one_at_a_time_and_reuse_results(monkeypatch):
+    gate = asyncio.Event()
+
+    async def slow_backtest(config, client, **kw):
+        await gate.wait()
+        return {"runs": [{"label": "x", "experiment": "x", "trades": 3, "total_r": 1.5, "profit_factor": 2.0}]}
+
+    async def load():
+        return single_experiment(make_settings())
+
+    monkeypatch.setattr(bt, "backtest", slow_backtest)
+    monkeypatch.setattr(bt, "make_client", lambda s, e: make_client(FakeBroker()))
+    jobs = bt.BacktestJobs()
+    a = jobs.start(bt.job_params([], 30, {}, {}), load)
+    assert jobs.start(bt.job_params(None, 30, {}, {}), load) is a, "same parameters: the same run"
+    with pytest.raises(bt.BacktestBusy):
+        jobs.start(bt.job_params([], 90, {}, {}), load)
+    gate.set()
+    await a.task
+    assert a.status == "done" and a.view(result=False)["summary"][0]["total_r"] == 1.5
+    assert jobs.start(bt.job_params([], 30, {}, {}), load) is a, "a fresh result is served again"
+    b = jobs.start(bt.job_params([], 90, {}, {}), load)
+    await b.task
+    assert [j.id for j in jobs.recent()] == [b.id, a.id]
+    with pytest.raises(ConfigError, match="set and compared"):
+        bt.job_params([], 30, {"min_risk_reward": "1"}, {"min_risk_reward": "1,2"})
+
+
+async def test_dashboard_backtest_page(db, monkeypatch):
+    from app.api.main import create_app
+
+    monkeypatch.setattr(engine_mod, "evaluate_strategy", fake_strategy({}))
+    broker = FakeBroker()
+    monkeypatch.setattr(bt, "make_client", lambda settings, experiments: make_client(broker))
+    base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
+    app = create_app(base, db=db)
+    app.state.db = db
+    auth, csrf = ("admin", "secret"), {"X-Requested-With": "tradlysis"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        assert (await c.get("/backtest")).status_code == 401
+        page = await c.get("/backtest", auth=auth)
+        assert page.status_code == 200 and "Run a backtest" in page.text
+
+        o = (await c.get("/api/backtest/options", auth=auth)).json()
+        keys = {s["key"] for s in o["settings"]}
+        assert {"breakout_min_touches", "min_risk_reward", "max_spread_pips"} <= keys
+        assert not keys & {"min_decision_confidence", "openrouter_model", "news_blackout_before_minutes"}
+        slug = o["experiments"][0]["slug"]
+        assert o["experiments"][0]["values"]["min_risk_reward"] == "2.0" and o["recent"] == []
+
+        body = {"experiments": [slug], "days": 1, "vary": {"min_risk_reward": "1.5,2"}}
+        assert (await c.post("/api/backtest", json=body, auth=auth)).status_code == 403, "CSRF header required"
+        bad = await c.post("/api/backtest", json={**body, "experiments": ["nope"]}, auth=auth, headers=csrf)
+        assert bad.status_code == 404
+        bad = await c.post("/api/backtest", json={**body, "set": {"capital_api_key": "x"}}, auth=auth, headers=csrf)
+        assert bad.status_code == 400
+        job = (await c.post("/api/backtest", json=body, auth=auth, headers=csrf)).json()
+        await app.state.backtests.get(job["id"]).task
+        done = (await c.get(f"/api/backtest/{job['id']}", auth=auth)).json()
+        assert done["status"] == "done", done
+        assert [r["variant"] for r in done["result"]["runs"]] == [{"min_risk_reward": "1.5"}, {"min_risk_reward": "2"}]
+        recent = (await c.get("/api/backtest/options", auth=auth)).json()["recent"]
+        assert recent[0]["id"] == job["id"] and "result" not in recent[0] and len(recent[0]["summary"]) == 2
+        assert (await c.get("/api/backtest/nope", auth=auth)).status_code == 404

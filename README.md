@@ -320,7 +320,7 @@ Rows: `limit` (max 1000) and `offset` (`has_more` says whether to page on), `ord
 `-column`, `columns=a,b`, `since`/`until` on the table's time column, and `f.<column>=<value>`
 filters (`null` matches empty). `python -m app.diagnose` prints the same diagnosis locally.
 
-### Backtester (`python -m app.backtest`)
+### Backtester (`/backtest` page, or `python -m app.backtest`)
 
 Waiting weeks for live trades is a slow way to learn whether an experiment's rules work. The
 backtester replays months of Capital.com candles through them instead: for every 15-minute
@@ -328,6 +328,14 @@ candle it builds the same technical state the engine builds, runs the experiment
 sends each setup through the real risk engine (spread limit, stop distance, R:R, sizing,
 cooldown, loss breakers) with the experiment's capital as a simulated account. Approved trades
 fill at the candle's closing bid/ask and run to their stop or target.
+
+**On the dashboard:** open **Backtest**, tick the experiments, pick a period (30 days to a year)
+and press *Run backtest*. To test a change, add a setting under *Change settings*: one value tries
+it, several (`1,2`) compare them side by side. Results show trades per week, win rate, total R,
+profit factor, the cumulative-R curve, a plain-language reading, what blocked the rest of the
+candles, near misses and every trade. The last ten runs stay listed until the dashboard restarts.
+
+**From the server's shell:**
 
 ```bash
 python -m app.backtest                                        # every enabled experiment, last 90 days

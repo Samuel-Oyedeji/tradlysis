@@ -29,9 +29,10 @@ import asyncio
 import bisect
 import itertools
 import json
+import secrets
 import sys
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -578,6 +579,114 @@ def make_client(settings: Settings, experiments: list[ExperimentConfig]) -> Any:
         epic=first.settings.broker_epic if first else settings.broker_epic,
         stream_url=settings.capital_stream_url,
     )
+
+
+# ---------------------------------------------------------------------- jobs (dashboard + data API)
+
+
+def job_params(experiments: list[str] | None, days: int, sets: dict[str, str], vary: dict[str, str]) -> dict[str, Any]:
+    """Validated, normalised parameters of a backtest started over HTTP (raises ConfigError)."""
+    if not 1 <= days <= MAX_DAYS:
+        raise ConfigError(f"days must be 1-{MAX_DAYS}")
+    s = parse_assignments([f"{k}={v}" for k, v in sets.items()], multi=False)
+    v = parse_assignments([f"{k}={x}" for k, x in vary.items()], multi=True)
+    clash = set(s) & set(v)
+    if clash:
+        raise ConfigError(f"{', '.join(sorted(clash))}: set and compared at once")
+    variants(v)
+    return {"experiment": sorted(set(experiments or [])), "days": days, "set": s, "vary": v}
+
+
+class BacktestBusy(Exception):
+    """Another backtest is running."""
+
+
+@dataclass
+class BacktestJob:
+    id: str
+    key: str
+    params: dict[str, Any]
+    started_at: datetime = field(default_factory=utcnow)
+    status: str = "running"  # running | done | failed
+    progress: str = "starting"
+    finished_at: datetime | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    task: asyncio.Task[None] | None = None
+
+    def view(self, *, text: bool = True, trades: bool = False, result: bool = True) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "id": self.id, "status": self.status, "params": self.params, "started_at": self.started_at.isoformat(),
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None, "progress": self.progress,
+        }
+        if self.error:
+            out["error"] = self.error
+        if self.result is not None and result:
+            out["result"] = self.result
+            if text:
+                out["text"] = render(self.result, trades=trades)
+        elif self.result is not None:
+            out["summary"] = [
+                {k: r[k] for k in ("label", "experiment", "trades", "total_r", "profit_factor")}
+                for r in self.result["runs"]
+            ]
+        return out
+
+
+class BacktestJobs:
+    """Backtests started from the dashboard or the data API: one runs at a time (each one logs in to
+    the broker and downloads months of candles), and the last few results are kept in memory."""
+
+    KEEP = 10
+
+    def __init__(self, reuse: timedelta = timedelta(minutes=30)) -> None:
+        self.reuse = reuse
+        self._jobs: dict[str, BacktestJob] = {}
+
+    def get(self, job_id: str) -> BacktestJob | None:
+        return self._jobs.get(job_id)
+
+    def recent(self) -> list[BacktestJob]:
+        return list(reversed(self._jobs.values()))
+
+    def start(self, params: dict[str, Any], load_config: Callable[[], Awaitable[Configuration]]) -> BacktestJob:
+        """Start a backtest, or return the running / recently finished one with the same parameters."""
+        key = json.dumps(params, sort_keys=True)
+        now = utcnow()
+        for job in self.recent():
+            if job.key == key and (
+                job.status == "running"
+                or (job.status == "done" and job.finished_at and now - job.finished_at <= self.reuse)
+            ):
+                return job
+        if any(j.status == "running" for j in self._jobs.values()):
+            raise BacktestBusy("another backtest is running; try again when it finishes")
+        job = BacktestJob(secrets.token_hex(6), key, params)
+        self._jobs[job.id] = job
+        while len(self._jobs) > self.KEEP:
+            del self._jobs[next(iter(self._jobs))]
+        job.task = asyncio.create_task(self._run(job, load_config))
+        return job
+
+    async def _run(self, job: BacktestJob, load_config: Callable[[], Awaitable[Configuration]]) -> None:
+        def note(msg: str) -> None:
+            job.progress = msg
+
+        p = job.params
+        try:
+            config = await load_config()
+            slugs = p["experiment"] or None
+            client = make_client(config.settings, select_experiments(config, slugs))
+            try:
+                job.result = await backtest(config, client, slugs=slugs, days=p["days"], sets=p["set"],
+                                            vary=p["vary"], progress=note)
+            finally:
+                await client.aclose()
+            job.status, job.progress = "done", "done"
+        except Exception as exc:  # reported to whoever polls the job
+            job.status, job.error = "failed", f"{type(exc).__name__}: {exc}" if not isinstance(exc, ConfigError) else str(exc)
+        finally:
+            job.finished_at = utcnow()
 
 
 async def run_from_db(
