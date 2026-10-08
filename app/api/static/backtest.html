@@ -56,6 +56,8 @@
 .trades { padding: 0 16px 14px; }
 .cmp td.best { font-weight: 700; }
 .savebar { position: static; }
+.modelbox { margin: 0 16px 12px; padding: 12px; border: 1px solid var(--grid); border-radius: 8px; }
+.modelbox .periods { grid-template-columns: repeat(3, auto); }
 .periods { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px 24px; padding: 0 16px 12px; font-size: 13px; align-items: start; }
 .periods .sub { margin-bottom: 2px; }
 .qchip { display: inline-block; font: 600 11px var(--mono); padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); margin: 0 4px 4px 0; color: var(--ink-2); }
@@ -96,6 +98,15 @@
             <button type="button" class="linkbtn" id="add-change">+ Change a setting</button>
             <div class="help">One value tries it for this run only (nothing is saved). Several values separated by commas,
               e.g. <span class="mono">1,2</span>, compare them side by side: every combination, up to 12.</div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="use-model">AI model <span class="env">optional</span></label>
+          <div>
+            <label class="chk"><input type="checkbox" id="use-model"> Also ask the decision model about every trade</label>
+            <div class="help">Shows whether the model's confirmations improve the rules alone: the trades it would have taken
+              versus the ones it would have skipped. One OpenRouter call per trade (a year of one experiment is usually
+              30-120 calls). There is no historical news, so the model sees a quiet news calendar.</div>
           </div>
         </div>
         <div class="savebar">
@@ -190,7 +201,7 @@ function formParams() {
   }
   const experiments = selectedExps();
   if (!experiments.length) throw new Error("Pick at least one experiment.");
-  return {experiments, days, set, vary};
+  return {experiments, days, set, vary, model: $("use-model").checked};
 }
 
 document.querySelectorAll("#days button").forEach(b => b.onclick = () => {
@@ -316,6 +327,25 @@ function periodsRow(r) {
     <div class="qs"><div class="sub">By quarter</div>${qs}</div></div>`;
 }
 
+function modelRow(r) {
+  const m = r.model;
+  if (!m) return "";
+  const avg = (v) => v == null ? "–" : `${v > 0 ? "+" : ""}${fmt(v, 2)}R`;
+  const edge = m.edge_per_trade_r;
+  const [tone, words] = m.taken.trades === 0 ? ["bad", "The model would have skipped every trade."]
+    : edge == null ? ["warn", "The model took every trade, so there is nothing to compare."]
+    : edge > 0.1 ? ["good", `The model helps: the trades it keeps average ${avg(m.taken_avg_r)}, the ones it drops ${avg(m.skipped_avg_r)}.`]
+    : edge < -0.1 ? ["bad", `The model hurts: the trades it drops average ${avg(m.skipped_avg_r)}, better than the ones it keeps (${avg(m.taken_avg_r)}).`]
+    : ["warn", `The model makes no clear difference (kept ${avg(m.taken_avg_r)} vs dropped ${avg(m.skipped_avg_r)} per trade).`];
+  return `<div class="modelbox"><div class="sub">AI model (asked about ${m.asked} trades${m.errors ? `, ${m.errors} errors` : ""})</div>
+    <div class="periods" style="padding:0">
+      <div><div class="sub">Rules alone</div>${signed(m.rules_only.total_r, 1, "R")} <span class="muted">· ${m.rules_only.trades} trades</span></div>
+      <div><div class="sub">With the model</div>${signed(m.taken.total_r, 1, "R")} <span class="muted">· ${m.taken.trades} taken</span></div>
+      <div><div class="sub">Skipped by the model</div>${signed(m.skipped.total_r, 1, "R")} <span class="muted">· ${m.skipped.trades} trades</span></div>
+    </div>
+    <div class="reading ${tone}" style="margin:10px 0 0">${words} Check period: ${signed(m.check_taken.total_r, 1, "R")} with the model vs ${signed(m.check_rules_only.total_r, 1, "R")} rules alone.</div></div>`;
+}
+
 function runCard(r, cur, split) {
   const [tone, text] = verdict(r);
   const winRate = r.win_rate == null ? "–" : `${fmt(r.win_rate * 100, 0)}%`;
@@ -330,6 +360,7 @@ function runCard(r, cur, split) {
     <div class="reading ${tone}" style="margin-top:14px">${text}${r.closed ? ` On ${fmt(r.capital, 0)} ${esc(cur)} at ${fmt(r.risk_per_trade_pct)}% risk: ${signed(r.pnl)} (${r.return_pct > 0 ? "+" : ""}${fmt(r.return_pct)}%).` : ""}</div>
     ${curve(r.trade_list, split)}
     ${periodsRow(r)}
+    ${modelRow(r)}
     <div class="cols">
       <div><div class="sub">Rules that blocked (share of ${fmt(r.cycles, 0)} candles)</div>${bars(r.rule_failures, r.cycles)}</div>
       <div><div class="sub">Near misses: candles where only this rule failed</div>${bars(r.near_misses, null, "near")}
@@ -386,7 +417,7 @@ function describe(p) {
   const exps = p.experiment.length ? p.experiment.map(expName).join(", ") : "all enabled experiments";
   const ch = [...Object.entries(p.set).map(([k, v]) => `${settingLabel(k)} = ${v}`),
               ...Object.entries(p.vary).map(([k, v]) => `${settingLabel(k)}: ${v.join(" vs ")}`)];
-  return `${exps} · ${p.days} days${ch.length ? " · " + ch.join(", ") : ""}`;
+  return `${exps} · ${p.days} days${ch.length ? " · " + ch.join(", ") : ""}${p.model ? " · with the AI model" : ""}`;
 }
 
 async function loadRecent(first = false) {

@@ -19,6 +19,7 @@ Routes:
                                         (complete candles, read from the broker; for testing strategies offline)
   GET /api/data/backtest                replay history through experiments' rules (app/backtest.py):
                                         ?experiment=<slug>&days=90&set.<key>=<v>&vary.<key>=<v1,v2>&wait=50
+                                        &model=true also asks the decision model about every trade
                                         Starts the run (one at a time) or returns its progress / result;
                                         repeat the same URL until "status" is "done".
 """
@@ -203,6 +204,7 @@ def build_router(
         experiment: list[str] | None = Query(None),
         days: int = Query(90),
         trades: bool = Query(False, description="list every trade in the text"),
+        model: bool = Query(False, description="also ask the decision model about every trade (OpenRouter calls)"),
         wait: float = Query(0, ge=0, le=55, description="seconds to wait for the result"),
     ) -> dict[str, Any]:
         from app import backtest as bt
@@ -214,6 +216,7 @@ def build_router(
                 experiment, days,
                 {k[4:]: v for k, v in qp.items() if k.startswith("set.")},
                 {k[5:]: v for k, v in qp.items() if k.startswith("vary.")},
+                model,
             )
         except ConfigError as exc:
             raise HTTPException(400, str(exc)) from None
