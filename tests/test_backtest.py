@@ -167,6 +167,31 @@ async def test_candles_are_fetched_in_windows_the_api_accepts():
     await client.aclose()
 
 
+async def test_windows_the_broker_refuses_are_split_not_skipped():
+    broker = FakeBroker(price_window_limit=400)  # like Capital.com: narrower than the documented 1000
+    broker.candles["M15"] = flat(15, 96 * 30)
+    client = make_client(broker)
+    problems: list[str] = []
+    got = await client.get_candles_between("M15", T0, T0 + timedelta(days=25), problems=problems)
+    assert len(got) == 96 * 25 and problems == []
+    assert broker.price_requests == 10, "250-candle windows once 1000 and 500 were refused"
+    broker.price_window_limit = 10  # refused even at the smallest window: reported
+    await client.get_candles_between("M15", T0, T0 + timedelta(days=1), problems=problems)
+    assert problems and problems[0].startswith("M15 2026-07-20T00:00:00: error.invalid.max.daterange")
+    await client.aclose()
+
+
+async def test_too_little_history_is_a_warning_not_zero_trades():
+    broker = FakeBroker()
+    broker.candles = {"M15": flat(15, 100, start=at(0)), "H1": flat(60, 50), "H4": flat(240, 50)}
+    client = make_client(broker)
+    result = await bt.backtest(single_experiment(make_settings()), client, days=1, end=at(14))
+    await client.aclose()
+    assert result["runs"][0]["cycles"] == 0
+    assert "EUR/USD: no candle could be replayed" in result["warnings"][0]
+    assert "WARNING: EUR/USD: no candle could be replayed" in bt.render(result)
+
+
 async def test_backtest_end_to_end_against_the_broker(monkeypatch):
     monkeypatch.setattr(engine_mod, "evaluate_strategy", fake_strategy({at(10, 30): "BUY"}))
     h = history(spike_at=at(11))

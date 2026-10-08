@@ -52,6 +52,7 @@ RESOLUTIONS = {
     "W": "WEEK",
 }
 MAX_PRICE_POINTS = 1000  # per request, documented maximum
+MIN_HISTORY_WINDOW_POINTS = 24  # get_candles_between never splits a window below this
 # History endpoints reject ranges longer than one day.
 HISTORY_WINDOW = timedelta(days=1) - timedelta(seconds=1)
 # The streaming session must be pinged at least every 10 minutes; the reply doubles as a heartbeat.
@@ -317,18 +318,25 @@ class CapitalClient:
         return parse_price_bars(raw, granularity, now)
 
     async def get_candles_between(
-        self, granularity: str, start: datetime, end: datetime, instrument: str | None = None
+        self, granularity: str, start: datetime, end: datetime, instrument: str | None = None,
+        problems: list[str] | None = None,
     ) -> list[Bar]:
-        """Candles opening in [start, end), fetched in windows of at most MAX_PRICE_POINTS bars
-        (the API refuses wider ranges). Windows the broker has no prices for (weekends, before its
-        history begins) are skipped. Used by the backtester."""
+        """Candles opening in [start, end), fetched window by window. Used by the backtester.
+
+        A window starts at MAX_PRICE_POINTS candles; when the broker refuses one (HTTP 400, e.g. a
+        date range it considers too wide), it is halved and retried, and the smaller size is kept for
+        the rest of the download. Windows with no prices (404: weekends, before the history begins)
+        are skipped. Windows refused even at the smallest size are listed in ``problems``.
+        """
         now = utcnow()
         epic = self.epic_for(instrument)
         if granularity == "M":
-            return monthly_bars(await self.get_candles_between("D", start, end, instrument), now)
+            return monthly_bars(await self.get_candles_between("D", start, end, instrument, problems), now)
         if granularity not in RESOLUTIONS:
             raise ValueError(f"unsupported granularity {granularity}")
-        step = timedelta(seconds=GRANULARITY_SECONDS[granularity] * MAX_PRICE_POINTS)
+        unit = timedelta(seconds=GRANULARITY_SECONDS[granularity])
+        step = unit * MAX_PRICE_POINTS
+        smallest = unit * MIN_HISTORY_WINDOW_POINTS
         out: dict[datetime, Bar] = {}
         t = start
         while t < end:
@@ -340,9 +348,14 @@ class CapitalClient:
             try:
                 data = await self._get(f"/prices/{epic}", params)
             except CapitalError as exc:
+                if exc.status_code == 400 and stop - t > smallest:
+                    step = max(smallest, (stop - t) / 2)  # too wide for the broker: retry smaller
+                    continue
                 if exc.status_code not in (400, 404):
                     raise
-                data = {}  # no prices in this window
+                if exc.status_code == 400 and problems is not None:
+                    problems.append(f"{granularity} {api_time(t)}: {exc.error_code or exc.body}")
+                data = {}
             for b in parse_price_bars(data.get("prices", []), granularity, now):
                 if start <= b.time < end:
                     out[b.time] = b
