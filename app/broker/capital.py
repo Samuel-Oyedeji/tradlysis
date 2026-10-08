@@ -316,6 +316,39 @@ class CapitalClient:
         raw = await self._get_prices(epic, RESOLUTIONS[granularity], min(count, MAX_PRICE_POINTS))
         return parse_price_bars(raw, granularity, now)
 
+    async def get_candles_between(
+        self, granularity: str, start: datetime, end: datetime, instrument: str | None = None
+    ) -> list[Bar]:
+        """Candles opening in [start, end), fetched in windows of at most MAX_PRICE_POINTS bars
+        (the API refuses wider ranges). Windows the broker has no prices for (weekends, before its
+        history begins) are skipped. Used by the backtester."""
+        now = utcnow()
+        epic = self.epic_for(instrument)
+        if granularity == "M":
+            return monthly_bars(await self.get_candles_between("D", start, end, instrument), now)
+        if granularity not in RESOLUTIONS:
+            raise ValueError(f"unsupported granularity {granularity}")
+        step = timedelta(seconds=GRANULARITY_SECONDS[granularity] * MAX_PRICE_POINTS)
+        out: dict[datetime, Bar] = {}
+        t = start
+        while t < end:
+            stop = min(t + step, end)
+            params = {
+                "resolution": RESOLUTIONS[granularity], "max": MAX_PRICE_POINTS,
+                "from": api_time(t), "to": api_time(stop - timedelta(seconds=1)),
+            }
+            try:
+                data = await self._get(f"/prices/{epic}", params)
+            except CapitalError as exc:
+                if exc.status_code not in (400, 404):
+                    raise
+                data = {}  # no prices in this window
+            for b in parse_price_bars(data.get("prices", []), granularity, now):
+                if start <= b.time < end:
+                    out[b.time] = b
+            t = stop
+        return [out[k] for k in sorted(out)]
+
     async def _get_prices(self, epic: str, resolution: str, max_points: int) -> list[dict[str, Any]]:
         data = await self._get(f"/prices/{epic}", {"resolution": resolution, "max": max_points})
         return data.get("prices", [])

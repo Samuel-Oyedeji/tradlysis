@@ -4,7 +4,8 @@ Authenticated with ``Authorization: Bearer <DATA_API_TOKEN>`` (set on the Config
 switches the API off), separately from the dashboard login.
 
 Guarantees:
-  * read-only: only GET routes, and every query runs in a READ ONLY transaction;
+  * read-only: only GET routes, and every query runs in a READ ONLY transaction (a backtest reads
+    candles from the broker and writes nothing anywhere);
   * only the bot's tables (``app/db/models.py``), never other tables in the shared database;
     there is deliberately no raw-SQL endpoint;
   * secrets are masked: ``app_config`` values of secret settings are never returned.
@@ -14,14 +15,20 @@ Routes:
   GET /api/data/tables/{table}          rows: ?limit=&offset=&order=-created_at&columns=a,b
                                         &since=&until= (on the table's time column) &f.<column>=<value>
   GET /api/data/diagnose?days=7         where each experiment's decision cycles stop (app/diagnose.py)
+  GET /api/data/backtest                replay history through experiments' rules (app/backtest.py):
+                                        ?experiment=<slug>&days=90&set.<key>=<v>&vary.<key>=<v1,v2>&wait=50
+                                        Starts the run (one at a time) or returns its progress / result;
+                                        repeat the same URL until "status" is "done".
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -32,12 +39,43 @@ from app.config.settings import Settings
 from app.config.store import SECRET_KEYS, SECRET_MASK, Configuration
 from app.db.models import Base
 from app.db.session import Database
+from app.market_data.timeutil import utcnow
 
 MAX_ROWS = 1000
 TABLES: dict[str, Table] = {t.name: t for t in Base.metadata.sorted_tables}
 # The column ``since``/``until`` and the default order use.
 TIME_COLUMNS = ("created_at", "candle_time", "taken_at", "time", "event_time", "open_time", "computed_at",
                 "updated_at", "published_at")
+
+
+# Finished backtests are served again for this long (same parameters), then re-run.
+BACKTEST_REUSE = timedelta(minutes=30)
+
+
+@dataclass
+class BacktestJob:
+    params: dict[str, Any]
+    started_at: datetime = field(default_factory=utcnow)
+    status: str = "running"  # running | done | failed
+    progress: str = "starting"
+    finished_at: datetime | None = None
+    text: str | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    task: asyncio.Task[None] | None = None
+
+    def view(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "status": self.status, "params": self.params, "started_at": self.started_at.isoformat(),
+            "progress": self.progress,
+        }
+        if self.finished_at:
+            out["finished_at"] = self.finished_at.isoformat()
+        if self.status == "done":
+            out["text"], out["result"] = self.text, self.result
+        if self.error:
+            out["error"] = self.error
+        return out
 
 
 def time_column(table: Table) -> str | None:
@@ -149,5 +187,71 @@ def build_router(
 
         db = get_db(request)
         return {"days": days, "text": await diagnosis(db, base, days)}
+
+    jobs: dict[str, BacktestJob] = {}
+
+    @router.get("/backtest", dependencies=[Depends(require_token)])
+    async def backtest(
+        request: Request,
+        experiment: list[str] | None = Query(None),
+        days: int = Query(90, ge=1),
+        trades: bool = Query(False, description="list every trade in the text"),
+        wait: float = Query(0, ge=0, le=55, description="seconds to wait for the result"),
+    ) -> dict[str, Any]:
+        from app import backtest as bt
+        from app.config.store import ConfigError
+
+        raw_set = {k[4:]: v for k, v in request.query_params.items() if k.startswith("set.")}
+        raw_vary = {k[5:]: v for k, v in request.query_params.items() if k.startswith("vary.")}
+        try:
+            sets = bt.parse_assignments([f"{k}={v}" for k, v in raw_set.items()], multi=False)
+            vary = bt.parse_assignments([f"{k}={v}" for k, v in raw_vary.items()], multi=True)
+            if days > bt.MAX_DAYS:
+                raise ConfigError(f"days must be 1-{bt.MAX_DAYS}")
+            bt.variants(vary)
+        except ConfigError as exc:
+            raise HTTPException(400, str(exc)) from None
+        params = {"experiment": sorted(experiment or []), "days": days, "set": sets, "vary": vary}
+        key = json.dumps(params, sort_keys=True)
+
+        job = jobs.get(key)
+        if job and job.status != "running" and job.finished_at and utcnow() - job.finished_at > BACKTEST_REUSE:
+            job = None
+        if job is None:
+            if any(j.status == "running" for j in jobs.values()):
+                raise HTTPException(429, "another backtest is running; try again when it finishes")
+            for k in [k for k, j in jobs.items() if j.status != "running"]:
+                del jobs[k]
+            job = jobs[key] = BacktestJob(params)
+            db = get_db(request)
+
+            async def run(job: BacktestJob = job) -> None:
+                def note(msg: str) -> None:
+                    job.progress = msg
+
+                try:
+                    config = await load_config(db)
+                    client = bt.make_client(config.settings, bt.select_experiments(config, experiment))
+                    try:
+                        job.result = await bt.backtest(
+                            config, client, slugs=experiment, days=days, sets=sets, vary=vary, progress=note
+                        )
+                    finally:
+                        await client.aclose()
+                    job.status, job.progress = "done", "done"
+                except Exception as exc:  # reported to the caller, not raised into the event loop
+                    job.status, job.error = "failed", f"{type(exc).__name__}: {exc}"
+                finally:
+                    job.finished_at = utcnow()
+
+            job.task = asyncio.create_task(run())
+        if wait and job.task and not job.task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(job.task), wait)
+            except TimeoutError:
+                pass
+        if job.status == "done" and job.result is not None:
+            job.text = bt.render(job.result, trades=trades)
+        return _jsonable(job.view())
 
     return router

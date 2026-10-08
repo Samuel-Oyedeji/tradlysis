@@ -1,0 +1,626 @@
+"""Backtester: replay months of Capital.com history through an experiment's deterministic rules.
+
+    python -m app.backtest                                   # every enabled experiment, last 90 days
+    python -m app.backtest --experiment gbpusd-breakout --days 180
+    python -m app.backtest --experiment eurusd-breakout --vary breakout_min_touches=1,2
+    python -m app.backtest --set min_risk_reward=1.5 --trades
+
+It answers "how often would this experiment trade, and how would those trades have done?" fast,
+instead of waiting weeks for live data. For every 15-minute candle it builds the same technical
+state the engine builds (``compute_technical_state`` on the candles complete at that time), runs
+the experiment's strategy, and sends every setup through the real risk engine (``risk.evaluate``:
+spread limit, stop distance, R:R, sizing, cooldown, loss breakers) with the experiment's capital as
+a simulated account. Approved trades fill at the candle's closing bid/ask and run to their stop or
+target on the following candles.
+
+What it leaves out (so live results will differ):
+  * the model: every setup is treated as if the model agreed (live, it may answer WAIT);
+  * the news blackout (no historical calendar);
+  * a stop and a target touched in the same 15-minute candle count as a loss (conservative),
+    and the spread is held at its value when the trade opened.
+
+It only reads: candles from the broker (never orders) and the configuration from the database.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import bisect
+import itertools
+import json
+import sys
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+
+from pydantic import ValidationError
+
+import app.engine as engine_mod
+from app.broker.types import InstrumentInfo
+from app.config.settings import Settings, get_settings
+from app.config.store import (
+    ENV_ONLY_KEYS,
+    SECRET_KEYS,
+    ConfigError,
+    Configuration,
+    ExperimentConfig,
+    _error_text,
+    load_configuration,
+    single_experiment,
+)
+from app.market_data.candles import Bar
+from app.market_data.timeutil import GRANULARITY_SECONDS, is_fx_market_open, trading_day, utcnow
+from app.risk.conversion import conversion_rates
+from app.risk.engine import OpenTradeRisk, RiskContext, evaluate
+from app.strategy.base import StrategyResult
+from app.technicals.engine import compute_technical_state
+
+MAX_DAYS = 365
+MAX_VARIANTS = 12
+DEFAULT_CAPITAL = Decimal("10000")
+# History needed before the first replayed candle for the engine's 300-bar windows (with weekends).
+WARMUP = {"M15": timedelta(days=7), "H1": timedelta(days=21), "H4": timedelta(days=80),
+          "D": timedelta(days=120), "W": timedelta(days=40)}
+MIN_BARS = 210  # the engine skips a cycle with fewer M15/H1/H4 bars
+# Keys a variant may not change: bootstrap values, secrets and what defines the experiment.
+FIXED_KEYS = frozenset(ENV_ONLY_KEYS) | SECRET_KEYS | {"instrument", "experiment_name"}
+
+
+# ---------------------------------------------------------------------- simulation
+
+
+@dataclass
+class SimTrade:
+    direction: str
+    opened: datetime
+    entry: float
+    stop_loss: float
+    take_profit: float
+    units: int
+    half_spread: float
+    risk_pips: float
+    closed: datetime | None = None
+    exit: float | None = None
+    outcome: str = "OPEN"  # TAKE_PROFIT | STOP_LOSS | OPEN (still open when the replay ended)
+    r: float = 0.0
+    pnl: float = 0.0  # account currency
+    best_r: float = 0.0  # max favourable excursion
+    worst_r: float = 0.0  # max adverse excursion
+    ambiguous: bool = False  # stop and target in the same candle (counted as the stop)
+
+    @property
+    def long(self) -> bool:
+        return self.direction == "BUY"
+
+    @property
+    def risk(self) -> float:
+        return abs(self.entry - self.stop_loss)
+
+    def r_at(self, price: float) -> float:
+        return ((price - self.entry) if self.long else (self.entry - price)) / self.risk if self.risk else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "direction": self.direction, "opened": self.opened.isoformat(), "entry": self.entry,
+            "stop_loss": self.stop_loss, "take_profit": self.take_profit, "units": self.units,
+            "risk_pips": self.risk_pips, "closed": self.closed.isoformat() if self.closed else None,
+            "exit": self.exit, "outcome": self.outcome, "r": round(self.r, 2), "pnl": round(self.pnl, 2),
+            "best_r": round(self.best_r, 2), "worst_r": round(self.worst_r, 2), "ambiguous": self.ambiguous,
+        }
+
+
+def step_trade(t: SimTrade, bar: Bar) -> tuple[str, float] | None:
+    """Advance an open trade through one mid-price candle. Returns (outcome, exit price) if it closed.
+
+    A long closes at the bid (mid - half spread), a short at the ask. A candle that opens beyond a
+    level fills at its open (gap); one that touches both the stop and the target counts as the stop.
+    """
+    hs = -t.half_spread if t.long else t.half_spread
+    o, h, lo = bar.open + hs, bar.high + hs, bar.low + hs
+    if t.long:
+        if o <= t.stop_loss:
+            return "STOP_LOSS", o
+        if o >= t.take_profit:
+            return "TAKE_PROFIT", o
+        hit_stop, hit_target = lo <= t.stop_loss, h >= t.take_profit
+        best, worst = h, lo
+    else:
+        if o >= t.stop_loss:
+            return "STOP_LOSS", o
+        if o <= t.take_profit:
+            return "TAKE_PROFIT", o
+        hit_stop, hit_target = h >= t.stop_loss, lo <= t.take_profit
+        best, worst = lo, h
+    if hit_stop:
+        t.ambiguous = hit_target
+        return "STOP_LOSS", t.stop_loss
+    if hit_target:
+        return "TAKE_PROFIT", t.take_profit
+    t.best_r = max(t.best_r, t.r_at(best))
+    t.worst_r = min(t.worst_r, t.r_at(worst))
+    return None
+
+
+@dataclass
+class Run:
+    """One experiment (or one variant of it) being replayed, with its simulated account."""
+
+    label: str
+    slug: str
+    strategy: str
+    instrument: str
+    settings: Settings
+    capital: Decimal
+    variant: dict[str, str] = field(default_factory=dict)
+    # simulated account
+    balance: Decimal = Decimal(0)
+    peak: Decimal = Decimal(0)
+    day: Any = None
+    day_start: Decimal = Decimal(0)
+    daily_halt: Any = None  # trading day the daily-loss breaker stopped
+    position: SimTrade | None = None
+    last_entry: dict[str, datetime] = field(default_factory=dict)
+    # results
+    cycles: int = 0
+    setups: int = 0
+    rule_failures: Counter[str] = field(default_factory=Counter)
+    near_misses: Counter[str] = field(default_factory=Counter)
+    risk_blocks: Counter[str] = field(default_factory=Counter)
+    trades: list[SimTrade] = field(default_factory=list)
+    breaker_trips: list[str] = field(default_factory=list)
+    first: datetime | None = None
+    last: datetime | None = None
+
+    def __post_init__(self) -> None:
+        self.balance = self.peak = self.day_start = self.capital
+
+    def nav(self, mid: float, quote_rate: float | None) -> Decimal:
+        t = self.position
+        if t is None:
+            return self.balance
+        price = mid - t.half_spread if t.long else mid + t.half_spread
+        upl = ((price - t.entry) if t.long else (t.entry - price)) * t.units * (quote_rate or 0)
+        return self.balance + Decimal(str(round(upl, 6)))
+
+    def close(self, outcome: str, price: float, when: datetime, quote_rate: float | None) -> None:
+        t = self.position
+        assert t is not None
+        t.outcome, t.exit, t.closed = outcome, price, when
+        t.r = t.r_at(price)
+        t.pnl = ((price - t.entry) if t.long else (t.entry - price)) * t.units * (quote_rate or 0)
+        self.balance += Decimal(str(round(t.pnl, 6)))
+        self.peak = max(self.peak, self.balance)
+        self.position = None
+
+
+@dataclass
+class History:
+    instrument: str
+    info: InstrumentInfo
+    bars: dict[str, list[Bar]]  # M15, H1, H4, D, W, M ascending
+
+
+def _ends(granularity: str, bars: list[Bar]) -> list[datetime]:
+    """When each candle completes (a month ends at the next month's start)."""
+    if granularity == "M":
+        return [datetime(b.time.year + b.time.month // 12, b.time.month % 12 + 1, 1, tzinfo=UTC) for b in bars]
+    d = timedelta(seconds=GRANULARITY_SECONDS[granularity])
+    return [b.time + d for b in bars]
+
+
+def replay(
+    history: History,
+    runs: list[Run],
+    start: datetime,
+    end: datetime,
+    *,
+    account_currency: str,
+    cross_rates: dict[str, float] | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> None:
+    """Replay every M15 candle closing in (start, end] for ``runs`` (all on ``history.instrument``)."""
+    bars = history.bars
+    ends = {g: _ends(g, b) for g, b in bars.items()}
+    counts = engine_mod.BARS_PER_TF
+    m15 = bars["M15"]
+    step = timedelta(minutes=15)
+    total = max(1, sum(1 for b in m15 if start < b.time + step <= end))
+    done = 0
+    for i, bar in enumerate(m15):
+        now = bar.time + step  # the engine decides once this candle has closed
+        if now <= start:
+            continue
+        if now > end:
+            break
+        done += 1
+        if progress and done % 200 == 0:
+            progress(done / total)
+        mid = bar.close
+        bid, ask = bar.bid_close or mid, bar.ask_close or mid
+        quote_rate, base_rate = conversion_rates(account_currency, history.instrument, mid, cross_rates)
+
+        # Open trades run through this candle first (they were opened at an earlier close).
+        for run in runs:
+            t = run.position
+            if t is not None and t.opened < now:
+                hit = step_trade(t, bar)
+                if hit:
+                    run.close(hit[0], hit[1], now, quote_rate)
+
+        if not is_fx_market_open(now - timedelta(seconds=1)):
+            continue
+        window: dict[str, list[Bar]] = {}
+        for g, n in counts.items():
+            k = bisect.bisect_right(ends[g], now) if g != "M15" else i + 1
+            window[g] = bars[g][max(0, k - n) : k]
+        if min(len(window[g]) for g in ("M15", "H1", "H4")) < MIN_BARS:
+            continue
+        tech = compute_technical_state(history.instrument, window, mid, history.info.pip_size, now)
+
+        for run in runs:
+            nav = run.nav(mid, quote_rate)
+            day = trading_day(now)
+            if day != run.day:
+                run.day, run.day_start = day, nav
+            run.peak = max(run.peak, nav)
+            run.cycles += 1
+            run.first = run.first or now
+            run.last = now
+            result = engine_mod.evaluate_strategy(run.strategy, tech, bid, ask, run.settings)
+            if not result.candidate:
+                run.rule_failures.update(result.failure_codes)
+                failed = [c.name for c in result.conditions if not c.passed]
+                if len(failed) == 1:
+                    run.near_misses[failed[0]] += 1
+                continue
+            run.setups += 1
+            _try_entry(run, history.info, result, now, bid, ask, nav, quote_rate, base_rate, account_currency)
+    if progress:
+        progress(1.0)
+
+
+def _try_entry(
+    run: Run, info: InstrumentInfo, result: StrategyResult, now: datetime, bid: float, ask: float,
+    nav: Decimal, quote_rate: float | None, base_rate: float | None, account_currency: str,
+) -> None:
+    plan = result.trade_plan
+    assert plan is not None
+    t = run.position
+    ctx = RiskContext(
+        now=now, decision=plan.direction, decision_valid=True, confidence=1.0, trade_plan=plan,
+        strategy_candidate=True, kill_switch_active=False, kill_switch_reason="",
+        daily_breaker_tripped=run.daily_halt == run.day, drawdown_breaker_tripped=False,
+        market_open=True, stream_connected=True, bid=bid, ask=ask, price_time=now, tradeable=True,
+        instrument=info, account_currency=account_currency, nav=nav, balance=run.balance,
+        margin_available=Decimal(10**12), account_state_time=now, day_start_nav=run.day_start,
+        peak_nav=run.peak, quote_home_rate=quote_rate, base_home_rate=base_rate,
+        open_trades=[OpenTradeRisk(info.name, t.units if t.long else -t.units, t.entry, t.stop_loss)] if t else [],
+        last_entry_same_direction_at=run.last_entry.get(plan.direction),
+    )
+    risk = evaluate(ctx, run.settings)
+    if risk.trip_daily_breaker and run.daily_halt != run.day:
+        run.daily_halt = run.day
+        run.breaker_trips.append(f"{now:%Y-%m-%d %H:%M} daily loss limit")
+    if risk.trip_drawdown_breaker:
+        # Live, this halts the experiment until someone resets it; here it is noted and re-based.
+        run.breaker_trips.append(f"{now:%Y-%m-%d %H:%M} drawdown limit (re-based, as if reset)")
+        run.peak = nav
+    if not risk.approved:
+        run.risk_blocks.update(risk.rejection_reasons)
+        return
+    assert risk.entry is not None and risk.stop_loss is not None and risk.take_profit is not None
+    assert risk.units is not None
+    run.position = SimTrade(
+        direction=plan.direction, opened=now, entry=risk.entry, stop_loss=risk.stop_loss,
+        take_profit=risk.take_profit, units=abs(risk.units), half_spread=(ask - bid) / 2,
+        risk_pips=round(abs(risk.entry - risk.stop_loss) / info.pip_size, 1),
+    )
+    run.trades.append(run.position)
+    run.last_entry[plan.direction] = now
+
+
+# ---------------------------------------------------------------------- results
+
+
+def summarize(run: Run, days: int) -> dict[str, Any]:
+    closed = [t for t in run.trades if t.outcome != "OPEN"]
+    wins = [t for t in closed if t.r > 0]
+    gross_win = sum(t.r for t in wins)
+    gross_loss = -sum(t.r for t in closed if t.r <= 0)
+    cum = peak = max_dd = 0.0
+    streak = worst_streak = 0
+    for t in closed:
+        cum += t.r
+        peak = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+        streak = streak + 1 if t.r <= 0 else 0
+        worst_streak = max(worst_streak, streak)
+    pnl = sum(t.pnl for t in closed)
+    hours = [(t.closed - t.opened).total_seconds() / 3600 for t in closed if t.closed]
+    return {
+        "label": run.label,
+        "experiment": run.slug,
+        "instrument": run.instrument,
+        "strategy": run.strategy,
+        "variant": run.variant,
+        "capital": float(run.capital),
+        "risk_per_trade_pct": run.settings.risk_per_trade_pct,
+        "cycles": run.cycles,
+        "first": run.first.isoformat() if run.first else None,
+        "last": run.last.isoformat() if run.last else None,
+        "setups": run.setups,
+        "trades": len(run.trades),
+        "closed": len(closed),
+        "wins": len(wins),
+        "losses": len(closed) - len(wins),
+        "win_rate": round(len(wins) / len(closed), 3) if closed else None,
+        "total_r": round(sum(t.r for t in closed), 2),
+        "avg_r": round(sum(t.r for t in closed) / len(closed), 2) if closed else None,
+        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
+        "max_drawdown_r": round(max_dd, 2),
+        "worst_losing_streak": worst_streak,
+        "pnl": round(pnl, 2),
+        "return_pct": round(pnl / float(run.capital) * 100, 2) if run.capital else None,
+        "trades_per_week": round(len(run.trades) / (days / 7), 2) if days else None,
+        "avg_hours_held": round(sum(hours) / len(hours), 1) if hours else None,
+        "ambiguous_candles": sum(1 for t in closed if t.ambiguous),
+        "rule_failures": dict(run.rule_failures.most_common()),
+        "near_misses": dict(run.near_misses.most_common()),
+        "risk_blocks": dict(run.risk_blocks.most_common()),
+        "breaker_trips": run.breaker_trips,
+        "trade_list": [t.to_dict() for t in run.trades],
+    }
+
+
+def _top(counter: dict[str, int], n: int = 6) -> str:
+    return ", ".join(f"{k} {v}" for k, v in list(counter.items())[:n]) or "none"
+
+
+def _fmt(v: float | None, spec: str = "", none: str = "–") -> str:
+    return none if v is None else format(v, spec)
+
+
+def render(result: dict[str, Any], *, trades: bool = False) -> str:
+    """The backtest as text."""
+    head = (
+        f"Tradlysis backtest · {result['start'][:16]} → {result['end'][:16]} UTC ({result['days']} days) · "
+        "rules + risk engine only (no model, no news blackout)"
+    )
+    lines = [head]
+    for instrument, tfs in result.get("history", {}).items():
+        lines.append(f"  {instrument} candles: " + ", ".join(
+            f"{g} {v['candles']} from {(v['first'] or '–')[:10]}" for g, v in tfs.items()
+        ))
+    lines.append("")
+    runs = result["runs"]
+    if len({r["experiment"] for r in runs}) < len(runs):
+        lines.append("Variants:")
+        lines.append(f"  {'run':<58} {'trades':>6} {'/wk':>5} {'win%':>5} {'total R':>8} {'PF':>5} {'maxDD R':>8}")
+        for r in runs:
+            win = _fmt(r["win_rate"] and r["win_rate"] * 100, ".0f")
+            lines.append(
+                f"  {r['label'][:58]:<58} {r['trades']:>6} {_fmt(r['trades_per_week'], '.1f'):>5} {win:>5} "
+                f"{r['total_r']:>+8.1f} {_fmt(r['profit_factor'], '.2f'):>5} {r['max_drawdown_r']:>8.1f}"
+            )
+        lines.append("")
+    for r in runs:
+        lines.append(f"■ {r['label']}  ({r['instrument']}, {r['strategy']})")
+        lines.append(f"  cycles {r['cycles']} · setups {r['setups']} · trades {r['trades']} "
+                     f"({_fmt(r['trades_per_week'], '.1f')}/week)")
+        if r["closed"]:
+            lines.append(
+                f"  results: {r['wins']} won / {r['losses']} lost ({r['win_rate'] * 100:.0f}%) · total {r['total_r']:+.1f}R · "
+                f"avg {r['avg_r']:+.2f}R · profit factor {_fmt(r['profit_factor'], '.2f', '∞')} · "
+                f"max drawdown {r['max_drawdown_r']:.1f}R · worst losing streak {r['worst_losing_streak']}"
+            )
+            lines.append(
+                f"  money: {r['pnl']:+.2f} on {r['capital']:g} ({r['return_pct']:+.2f}%, "
+                f"{r['risk_per_trade_pct']}% risk per trade) · avg held {_fmt(r['avg_hours_held'], '.1f')}h"
+                + (f" · {r['ambiguous_candles']} stop+target candle(s) counted as losses" if r["ambiguous_candles"] else "")
+            )
+        lines.append(f"  rules that blocked: {_top(r['rule_failures'])}")
+        lines.append(f"  near misses (one rule failed): {_top(r['near_misses'])}")
+        if r["risk_blocks"]:
+            lines.append(f"  setups the risk engine refused: {_top(r['risk_blocks'])}")
+        for trip in r["breaker_trips"]:
+            lines.append(f"  breaker: {trip}")
+        if trades:
+            for t in r["trade_list"]:
+                lines.append(
+                    f"    {t['opened'][:16]} {t['direction']:<4} {t['entry']} sl {t['stop_loss']} tp {t['take_profit']} "
+                    f"({t['risk_pips']} pips) → {t['outcome']} {t['r']:+.2f}R {t['pnl']:+.2f}"
+                    f" (best {t['best_r']:+.1f}R, worst {t['worst_r']:+.1f}R)"
+                )
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+# ---------------------------------------------------------------------- inputs
+
+
+def parse_assignments(items: list[str], *, multi: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        key = key.strip().lower()
+        if not sep or not key:
+            raise ConfigError(f"expected key=value, got {item!r}")
+        if key in FIXED_KEYS or key not in Settings.model_fields:
+            raise ConfigError(f"{key!r} is not a setting a backtest can change")
+        out[key] = [v.strip() for v in value.split(",")] if multi else value.strip()
+    return out
+
+
+def variants(vary: dict[str, list[str]]) -> list[dict[str, str]]:
+    if not vary:
+        return [{}]
+    keys = list(vary)
+    combos = [dict(zip(keys, values, strict=True)) for values in itertools.product(*(vary[k] for k in keys))]
+    if len(combos) > MAX_VARIANTS:
+        raise ConfigError(f"{len(combos)} variants; at most {MAX_VARIANTS}")
+    return combos
+
+
+def build_runs(
+    experiments: list[ExperimentConfig], sets: dict[str, str], vary: dict[str, list[str]]
+) -> list[Run]:
+    runs = []
+    for exp in experiments:
+        for variant in variants(vary):
+            changes = {**sets, **variant}
+            values = exp.settings.model_dump()
+            values.update(changes)
+            values["trading_enabled"] = True  # the question is what the rules would do
+            try:
+                settings = Settings.model_validate(values)
+            except ValidationError as exc:
+                raise ConfigError(f"{exp.slug}: {_error_text(exc)}") from None
+            label = exp.slug + (" [" + ", ".join(f"{k}={v}" for k, v in changes.items()) + "]" if changes else "")
+            runs.append(Run(label, exp.slug, exp.strategy, exp.instrument, settings,
+                            exp.capital or DEFAULT_CAPITAL, dict(changes)))
+    return runs
+
+
+def select_experiments(config: Configuration, slugs: list[str] | None) -> list[ExperimentConfig]:
+    experiments = config.experiments or single_experiment(config.settings).experiments
+    if not slugs:
+        chosen = [e for e in experiments if e.enabled] or experiments
+    else:
+        known = {e.slug: e for e in experiments}
+        missing = [s for s in slugs if s not in known]
+        if missing:
+            raise ConfigError(f"unknown experiment(s): {', '.join(missing)} (known: {', '.join(known)})")
+        chosen = [known[s] for s in slugs]
+    return chosen
+
+
+async def fetch_history(client: Any, instrument: str, start: datetime, end: datetime) -> History:
+    from app.broker.capital import monthly_bars
+
+    info = await client.get_instrument(instrument)
+    bars = {}
+    for g in ("M15", "H1", "H4", "D", "W"):
+        bars[g] = [b for b in await client.get_candles_between(g, start - WARMUP[g], end, instrument)
+                   if b.time + timedelta(seconds=GRANULARITY_SECONDS[g]) <= end]
+    bars["M"] = monthly_bars(bars["D"], end)
+    return History(instrument, info, bars)
+
+
+# ---------------------------------------------------------------------- entry points
+
+
+async def backtest(
+    config: Configuration,
+    client: Any,
+    *,
+    slugs: list[str] | None = None,
+    days: int = 90,
+    sets: dict[str, str] | None = None,
+    vary: dict[str, list[str]] | None = None,
+    end: datetime | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Run the backtest and return the results (``render`` turns them into text)."""
+    if not 1 <= days <= MAX_DAYS:
+        raise ConfigError(f"days must be 1-{MAX_DAYS}")
+    runs = build_runs(select_experiments(config, slugs), sets or {}, vary or {})
+    end = end or utcnow()
+    end = end.replace(minute=end.minute - end.minute % 15, second=0, microsecond=0)
+    start = end - timedelta(days=days)
+    for r in runs:
+        client.register_market(r.instrument, r.settings.broker_epic)
+    account = await client.get_account()
+    say = progress or (lambda _msg: None)
+    coverage: dict[str, dict[str, Any]] = {}
+    for instrument in dict.fromkeys(r.instrument for r in runs):
+        mine = [r for r in runs if r.instrument == instrument]
+        say(f"{instrument}: downloading candles")
+        history = await fetch_history(client, instrument, start, end)
+        coverage[instrument] = {
+            g: {"candles": len(b), "first": b[0].time.isoformat() if b else None}
+            for g, b in history.bars.items() if g in ("M15", "H1", "H4")
+        }
+        cross: dict[str, float] = {}
+        base, _, quote = instrument.partition("_")
+        if account.currency not in (base, quote):
+            for ccy in (base, quote):
+                rate = await client.get_conversion_rate(ccy, account.currency)
+                if rate:
+                    cross[ccy] = rate
+        say(f"{instrument}: replaying {len(history.bars['M15'])} M15 candles")
+        await asyncio.to_thread(
+            replay, history, mine, start, end, account_currency=account.currency, cross_rates=cross,
+            progress=lambda f, i=instrument: say(f"{i}: {f:.0%} replayed"),
+        )
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "days": days,
+        "account_currency": account.currency,
+        "history": coverage,
+        "runs": [summarize(r, days) for r in runs],
+    }
+
+
+def make_client(settings: Settings, experiments: list[ExperimentConfig]) -> Any:
+    from app.broker.capital import CapitalClient
+
+    settings.require_broker_credentials()
+    first = experiments[0] if experiments else None
+    return CapitalClient(
+        settings.capital_base_url, settings.capital_api_key, settings.capital_identifier,
+        settings.capital_api_password, account_id=settings.capital_account_id,
+        instrument=first.instrument if first else settings.instrument,
+        epic=first.settings.broker_epic if first else settings.broker_epic,
+        stream_url=settings.capital_stream_url,
+    )
+
+
+async def run_from_db(
+    base: Settings, *, slugs: list[str] | None, days: int, sets: dict[str, str], vary: dict[str, list[str]],
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    from app.db.session import Database
+
+    db = Database(base)
+    try:
+        config = await load_configuration(db, base)
+    finally:
+        await db.dispose()
+    client = make_client(config.settings, select_experiments(config, slugs))
+    try:
+        return await backtest(config, client, slugs=slugs, days=days, sets=sets, vary=vary, progress=progress)
+    finally:
+        await client.aclose()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Replay history through experiments' rules and risk engine")
+    parser.add_argument("--experiment", action="append", help="experiment slug (repeatable; default: all enabled)")
+    parser.add_argument("--days", type=int, default=90, help=f"how far back (default 90, max {MAX_DAYS})")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="change a setting")
+    parser.add_argument("--vary", action="append", default=[], metavar="KEY=V1,V2",
+                        help="compare values of a setting (repeatable: every combination)")
+    parser.add_argument("--trades", action="store_true", help="list every trade")
+    parser.add_argument("--json", action="store_true", help="print the results as JSON")
+    args = parser.parse_args()
+    try:
+        sets = parse_assignments(args.set, multi=False)
+        vary = parse_assignments(args.vary, multi=True)
+        result = asyncio.run(run_from_db(
+            get_settings(), slugs=args.experiment, days=args.days, sets=sets, vary=vary,
+            progress=lambda m: print(m, file=sys.stderr),
+        ))
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2) if args.json else render(result, trades=args.trades))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
