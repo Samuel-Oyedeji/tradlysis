@@ -51,6 +51,7 @@ class FakeBroker:
     close_requests: list[str] = field(default_factory=list)
     logins: int = 0
     price_requests: int = 0
+    price_window_limit: int = 1000  # the real API refuses date ranges wider than this many candles
     token: str = ""
     next_id: int = 1000
 
@@ -238,7 +239,7 @@ class FakeBroker:
             if "from" in req.url.params:
                 lo, hi = parse_time(req.url.params["from"]), parse_time(req.url.params["to"])
                 # Like the real API: a range wider than ``max`` bars is refused.
-                if (hi - lo).total_seconds() >= count * GRANULARITY_SECONDS[g]:
+                if (hi - lo).total_seconds() >= min(count, self.price_window_limit) * GRANULARITY_SECONDS[g]:
                     return httpx.Response(400, json={"errorCode": "error.invalid.max.daterange"})
                 bars = [b for b in bars if lo <= b.time <= hi]
                 if not bars:
