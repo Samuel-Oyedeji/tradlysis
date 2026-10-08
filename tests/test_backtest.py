@@ -150,6 +150,9 @@ def test_assignments_and_variants():
     assert runs[1].settings.max_spread_pips == 2 and runs[0].settings.trading_enabled
     with pytest.raises(ConfigError, match="MIN_RISK_REWARD"):
         bt.build_runs([exp], {"min_risk_reward": "-1"}, {})
+    # a setting of another strategy (London hours) leaves this trend-pullback experiment as one run
+    runs = bt.build_runs([exp], {"session_range_end_hour": "7"}, {"session_target_r": ["2", "3"]})
+    assert [r.label for r in runs] == [exp.slug] and runs[0].variant == {}
     with pytest.raises(ConfigError, match="unknown experiment"):
         bt.select_experiments(single_experiment(make_settings()), ["nope"])
 
@@ -209,7 +212,9 @@ async def test_backtest_end_to_end_against_the_broker(monkeypatch):
     assert normal["trades"] == 1 and normal["total_r"] == 2.0
     assert "EUR_USD: downloading candles" in notes
     text = bt.render(result)
-    assert "Variants:" in text and "max_spread_pips=0.5" in text
+    assert "Variants (tuning = before" in text and "max_spread_pips=0.5" in text
+    assert result["selection"][0]["experiment"] == normal["experiment"] and "tuning" in normal and "quarters" in normal
+    assert "best on the tuning period" in text and "out of sample: tuning" in text
     assert result["history"]["EUR_USD"]["H4"]["candles"] == 6 * 50 + 3  # complete by the end (14:00) only
     assert "EUR_USD candles: M15 " in text
 
@@ -301,3 +306,68 @@ async def test_dashboard_backtest_page(db, monkeypatch):
         recent = (await c.get("/api/backtest/options", auth=auth)).json()["recent"]
         assert recent[0]["id"] == job["id"] and "result" not in recent[0] and len(recent[0]["summary"]) == 2
         assert (await c.get("/api/backtest/nope", auth=auth)).status_code == 404
+
+
+def test_out_of_sample_periods_and_selection():
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    run = run_for()
+
+    def tr(day: int, r: float) -> bt.SimTrade:
+        t = bt.SimTrade("BUY", t0 + timedelta(days=day), 1.1, 1.098, 1.104, 1000, 0.00005, 20)
+        t.outcome, t.r = ("TAKE_PROFIT" if r > 0 else "STOP_LOSS"), r
+        return t
+
+    run.trades = [tr(5, 2), tr(10, -1), tr(40, 2), tr(70, -1), tr(80, -1)]
+    p = bt.periods(run, t0, t0 + timedelta(days=90), t0 + timedelta(days=60))
+    assert p["tuning"] == {"trades": 3, "total_r": 3.0, "win_rate": 0.667, "profit_factor": 4.0}
+    assert p["check"]["total_r"] == -2.0 and p["check"]["trades"] == 2
+    assert [q["total_r"] for q in p["quarters"]] == [1.0, 2.0, 0.0, -2.0] and p["positive_quarters"] == 2
+
+    def summary(label, tuning, check):
+        return {"experiment": "x", "label": label, "variant": {"k": label},
+                "tuning": {"total_r": tuning}, "check": {"total_r": check, "trades": 9}}
+
+    sel = bt.selection([summary("a", 5, -1), summary("b", 2, 3), summary("c", 1, 1), {**summary("z", 0, 0), "experiment": "y"}])
+    assert len(sel) == 1 and sel[0]["label"] == "a" and sel[0]["check_rank"] == 3 and sel[0]["outcome"] == "fails"
+    sel = bt.selection([summary("a", 5, 4), summary("b", 2, 3)])
+    assert sel[0]["outcome"] == "holds" and sel[0]["check_rank"] == 1
+    assert bt.selection([summary("a", 5, 1), summary("b", 2, 3)])[0]["outcome"] == "mixed"
+
+
+async def test_candles_endpoint_feeds_an_offline_backtest(db, monkeypatch, tmp_path):
+    import json as _json
+
+    from app.api.main import create_app
+    from app.config import store
+
+    token = "t" * 32
+    base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
+    await store.save_global(db, base, {"data_api_token": token}, "test")
+    h = history(spike_at=at(11))
+    broker = FakeBroker()
+    end = h.bars["M15"][-1].time + timedelta(minutes=15)
+    broker.candles = {g: h.bars[g] for g in ("M15", "H1", "H4")}
+    monkeypatch.setattr(bt, "make_client", lambda settings, experiments: make_client(broker))
+    monkeypatch.setattr("app.market_data.timeutil.utcnow", lambda: end)
+    app = create_app(base, db=db)
+    app.state.db = db
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        assert (await c.get("/api/data/candles?instrument=EUR_USD")).status_code == 401
+        assert (await c.get("/api/data/candles?instrument=eurusd", headers=headers)).status_code == 422
+        for g in ("M15", "H1", "H4"):
+            r = await c.get(f"/api/data/candles?instrument=EUR_USD&granularity={g}&days=60", headers=headers)
+            assert r.status_code == 200, r.text
+            payload = r.json()
+            assert payload["info"]["name"] == "EUR_USD" and payload["count"] == len(payload["candles"]) > 0
+            (tmp_path / f"EUR_USD_{g}.json").write_text(_json.dumps(payload))
+
+    monkeypatch.setattr(engine_mod, "evaluate_strategy", fake_strategy({at(10, 30): "BUY"}))
+    offline = await bt.backtest(single_experiment(make_settings()), bt.CandleFileClient(str(tmp_path)),
+                                days=1, end=at(14))
+    live = make_client(broker)
+    online = await bt.backtest(single_experiment(make_settings()), live, days=1, end=at(14))
+    await live.aclose()
+    keep = ("cycles", "setups", "trades", "total_r")
+    assert [{k: r[k] for k in keep} for r in offline["runs"]] == [{k: r[k] for k in keep} for r in online["runs"]]
+    assert offline["runs"][0]["trades"] == 1 and offline["runs"][0]["total_r"] == 2.0

@@ -124,7 +124,10 @@ async def test_experiments_are_created_and_validated(db):
 
 
 def test_strategy_settings_are_tagged():
-    assert store.STRATEGIES == {"trend_pullback": "Trend pullback", "range_breakout": "Range breakout"}
+    assert store.STRATEGIES == {"trend_pullback": "Trend pullback", "range_breakout": "Range breakout",
+                                "trend_following": "Trend following (4h)", "london_breakout": "London breakout"}
+    assert store.FIELD_BY_KEY["trend_stop_atr"].strategies == ("trend_following",)
+    assert store.FIELD_BY_KEY["session_target_r"].strategies == ("london_breakout",)
     assert store.FIELD_BY_KEY["breakout_range_bars"].strategies == ("range_breakout",)
     assert store.FIELD_BY_KEY["strategy_pullback_lookback_bars"].strategies == ("trend_pullback",)
     assert store.FIELD_BY_KEY["min_risk_reward"].strategies == ()

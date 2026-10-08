@@ -56,6 +56,12 @@
 .trades { padding: 0 16px 14px; }
 .cmp td.best { font-weight: 700; }
 .savebar { position: static; }
+.periods { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px 24px; padding: 0 16px 12px; font-size: 13px; align-items: start; }
+.periods .sub { margin-bottom: 2px; }
+.qchip { display: inline-block; font: 600 11px var(--mono); padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); margin: 0 4px 4px 0; color: var(--ink-2); }
+.qchip.pos { border-color: var(--good); color: var(--good-ink); } .qchip.neg { border-color: var(--bad); color: var(--bad-ink); }
+@media (max-width: 899px) { .periods { grid-template-columns: auto auto; } .periods .qs { grid-column: 1 / -1; } }
+.runs.multi .periods { grid-template-columns: auto auto; } .runs.multi .periods .qs { grid-column: 1 / -1; }
 .recent-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
 </style>
 </head>
@@ -239,9 +245,12 @@ function progressText(job) {
 function verdict(r) {
   const top = Object.keys(r.rule_failures)[0];
   if (!r.cycles) return ["bad", "Nothing was replayed: too little candle history came back from the broker (see the warning above)."];
-  if (!r.trades) return ["bad", `No trades in ${r.cycles} candles. ${top ? `The rule that blocked most often: ${pretty(top)}.` : ""} Try a longer period or loosen that rule.`];
+  if (!r.trades) return ["bad", `No trades in ${r.cycles} candles. ${top ? `The rule that blocked most often: ${esc(pretty(top))}.` : ""} Try a longer period or loosen that rule.`];
   if (r.closed < 10) return ["warn", `Only ${r.closed} closed trade${r.closed === 1 ? "" : "s"}: too few to judge. Try a longer period.`];
-  if (r.total_r > 0 && (r.profit_factor ?? 99) >= 1.3) return ["good", `Promising: ${fmt(r.closed, 0)} trades made ${fmt(r.total_r, 1)}R, a profit factor of ${fmt(r.profit_factor)}. Compare it with the live results once it trades.`];
+  const q = r.quarters ? `positive in ${r.positive_quarters} of ${r.quarters.length} quarters` : "";
+  if (r.total_r > 0 && r.check && (r.check.total_r <= 0 || r.positive_quarters < r.quarters.length / 2))
+    return ["warn", `Profitable overall (${fmt(r.total_r, 1)}R) but not steady: ${q}, and ${signed(r.check.total_r, 1, "R")} in the last third. Likely a few lucky stretches, not an edge.`];
+  if (r.total_r > 0 && (r.profit_factor ?? 99) >= 1.3) return ["good", `Promising${q ? ` (${q})` : ""}: ${fmt(r.closed, 0)} trades made ${fmt(r.total_r, 1)}R, a profit factor of ${fmt(r.profit_factor)}. Compare it with the live results once it trades.`];
   if (r.total_r > 0) return ["warn", `Slightly positive (${fmt(r.total_r, 1)}R over ${r.closed} trades, profit factor ${fmt(r.profit_factor)}): not clearly better than chance yet.`];
   return ["bad", `Lost ${fmt(-r.total_r, 1)}R over ${r.closed} trades (profit factor ${fmt(r.profit_factor)}). The rules as set have no edge over this period.`];
 }
@@ -268,7 +277,7 @@ function bars(counts, total, cls = "") {
   }).join("")}</div>`;
 }
 
-function curve(trades) {
+function curve(trades, split) {
   const closed = trades.filter(t => t.outcome !== "OPEN");
   if (closed.length < 2) return "";
   let cum = 0;
@@ -279,9 +288,11 @@ function curve(trades) {
   const y = (v) => pad + (hi - v) * (H - 2 * pad) / span;
   const line = pts.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
   const end = pts[pts.length - 1];
-  return `<div class="curve"><div class="sub">Cumulative R, trade by trade</div>
+  const cut = split ? closed.findIndex(t => t.opened >= split) : -1;  // first trade of the check period
+  const splitLine = cut > 0 ? `<line x1="${x(cut).toFixed(1)}" x2="${x(cut).toFixed(1)}" y1="${pad}" y2="${H - pad}" stroke="var(--ink-3)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>` : "";
+  return `<div class="curve"><div class="sub">Cumulative R, trade by trade${cut > 0 ? " · dotted line: the check period starts" : ""}</div>
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Cumulative result: ${fmt(end, 1)}R after ${closed.length} trades">
-      <line x1="${pad}" x2="${W - pad}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>
+      <line x1="${pad}" x2="${W - pad}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>${splitLine}
       <path d="${line}" fill="none" stroke="${end >= 0 ? "var(--good)" : "var(--bad)"}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
     </svg></div>`;
 }
@@ -297,7 +308,15 @@ function tradeTable(list) {
       <td class="num">${fmt(t.best_r, 1)} / ${fmt(t.worst_r, 1)}</td></tr>`).join("")}</tbody></table></div></details>`;
 }
 
-function runCard(r, cur) {
+function periodsRow(r) {
+  if (!r.quarters) return "";
+  const qs = r.quarters.map((x, i) => `<span class="qchip ${x.total_r > 0 ? "pos" : x.total_r < 0 ? "neg" : ""}" title="${x.trades} trades from ${esc(new Date(x.start).toLocaleDateString())}">Q${i + 1} ${x.total_r > 0 ? "+" : ""}${fmt(x.total_r, 1)}R</span>`).join("");
+  return `<div class="periods"><div><div class="sub">Tuning (first two-thirds)</div>${signed(r.tuning.total_r, 1, "R")} <span class="muted">· ${r.tuning.trades} trades</span></div>
+    <div><div class="sub">Check (last third)</div>${signed(r.check.total_r, 1, "R")} <span class="muted">· ${r.check.trades} trades</span></div>
+    <div class="qs"><div class="sub">By quarter</div>${qs}</div></div>`;
+}
+
+function runCard(r, cur, split) {
   const [tone, text] = verdict(r);
   const winRate = r.win_rate == null ? "–" : `${fmt(r.win_rate * 100, 0)}%`;
   return `<section class="panel run">
@@ -308,8 +327,9 @@ function runCard(r, cur) {
       ${tile("Total R", r.closed ? signed(r.total_r, 1, "R") : "–", r.closed ? `avg ${r.avg_r > 0 ? "+" : ""}${fmt(r.avg_r)}R a trade` : "")}
       ${tile("Profit factor", r.profit_factor == null ? (r.closed ? "∞" : "–") : fmt(r.profit_factor), `max drawdown ${fmt(r.max_drawdown_r, 1)}R`)}
     </section>
-    <div class="reading ${tone}" style="margin-top:14px">${esc(text)}${r.closed ? ` On ${fmt(r.capital, 0)} ${esc(cur)} at ${fmt(r.risk_per_trade_pct)}% risk: ${signed(r.pnl)} (${r.return_pct > 0 ? "+" : ""}${fmt(r.return_pct)}%).` : ""}</div>
-    ${curve(r.trade_list)}
+    <div class="reading ${tone}" style="margin-top:14px">${text}${r.closed ? ` On ${fmt(r.capital, 0)} ${esc(cur)} at ${fmt(r.risk_per_trade_pct)}% risk: ${signed(r.pnl)} (${r.return_pct > 0 ? "+" : ""}${fmt(r.return_pct)}%).` : ""}</div>
+    ${curve(r.trade_list, split)}
+    ${periodsRow(r)}
     <div class="cols">
       <div><div class="sub">Rules that blocked (share of ${fmt(r.cycles, 0)} candles)</div>${bars(r.rule_failures, r.cycles)}</div>
       <div><div class="sub">Near misses: candles where only this rule failed</div>${bars(r.near_misses, null, "near")}
@@ -321,15 +341,26 @@ function runCard(r, cur) {
   </section>`;
 }
 
-function comparison(runs) {
+function selectionNote(sel) {
+  const said = {holds: ["good", "it holds up."], mixed: ["warn", "it stayed profitable, but another variant did better there, so the choice between them is likely luck."],
+    fails: ["bad", "it does <b>not</b> hold up, so the difference is likely luck."]};
+  return (sel || []).map(x => { const [tone, words] = said[x.outcome || (x.holds ? "holds" : "fails")];
+    return `<div class="reading ${tone}" style="margin:12px 16px 0">
+    <b>${esc(expName(x.experiment))}:</b> the best variant on the tuning period was ${changes(x.variant)} (${signed(x.tuning_r, 1, "R")}).
+    On the check period, which it was not chosen on, it made ${signed(x.check_r, 1, "R")} over ${x.check_trades} trades,
+    #${x.check_rank} of ${x.variants}: ${words}</div>`; }).join("");
+}
+
+function comparison(runs, sel) {
   if (runs.length < 2) return "";
+  const oos = runs[0].tuning !== undefined;
   const best = Math.max(...runs.map(r => r.closed ? r.total_r : -Infinity));
   return `<section class="panel run"><div class="panel-h"><h2>Side by side</h2><span class="aside">best total R in bold</span></div>
-    <div class="scroll-x"><table class="t cmp"><thead><tr><th>Run</th><th class="num">Trades</th><th class="num">/ week</th><th class="num">Win rate</th><th class="num">Total R</th><th class="num">Avg R</th><th class="num">Profit factor</th><th class="num">Max DD</th><th class="num">P/L</th></tr></thead>
+    <div class="scroll-x"><table class="t cmp"><thead><tr><th>Run</th><th class="num">Trades</th><th class="num">/ week</th><th class="num">Win rate</th><th class="num">Total R</th><th class="num">Avg R</th><th class="num">Profit factor</th><th class="num">Max DD</th><th class="num">P/L</th>${oos ? '<th class="num" title="first two-thirds">Tuning R</th><th class="num" title="last third">Check R</th>' : ""}</tr></thead>
     <tbody>${runs.map(r => `<tr><td><b>${esc(expName(r.experiment))}</b><div>${changes(r.variant) || '<span class="muted" style="font-size:12px">current settings</span>'}</div></td>
       <td class="num">${r.trades}</td><td class="num">${fmt(r.trades_per_week, 1)}</td><td class="num">${r.win_rate == null ? "–" : fmt(r.win_rate * 100, 0) + "%"}</td>
       <td class="num ${r.closed && r.total_r === best ? "best" : ""}">${r.closed ? signed(r.total_r, 1, "R") : "–"}</td><td class="num">${r.avg_r == null ? "–" : signed(r.avg_r, 2, "R")}</td>
-      <td class="num">${r.profit_factor == null ? "–" : fmt(r.profit_factor)}</td><td class="num">${fmt(r.max_drawdown_r, 1)}R</td><td class="num">${r.closed ? signed(r.pnl) : "–"}</td></tr>`).join("")}</tbody></table></div></section>`;
+      <td class="num">${r.profit_factor == null ? "–" : fmt(r.profit_factor)}</td><td class="num">${fmt(r.max_drawdown_r, 1)}R</td><td class="num">${r.closed ? signed(r.pnl) : "–"}</td>${oos ? `<td class="num">${signed(r.tuning.total_r, 1, "R")}</td><td class="num">${signed(r.check.total_r, 1, "R")}</td>` : ""}</tr>`).join("")}</tbody></table></div>${selectionNote(sel)}<div style="height:14px"></div></section>`;
 }
 
 function show(job) {
@@ -344,8 +375,8 @@ function show(job) {
       <span class="muted">${esc(new Date(res.start).toLocaleDateString())} – ${esc(new Date(res.end).toLocaleDateString())} (${res.days} days)</span></div>
     ${hist ? `<div class="muted" style="font-size:12px">${esc(hist)}</div>` : ""}
     ${(res.warnings || []).map(w => `<div class="banner" style="display:block;margin:12px 0 0">${esc(w)}</div>`).join("")}
-    ${comparison(res.runs)}
-    <div class="runs ${res.runs.length > 1 ? "multi" : ""}">${res.runs.map(r => runCard(r, res.account_currency)).join("")}</div>`;
+    ${comparison(res.runs, res.selection)}
+    <div class="runs ${res.runs.length > 1 ? "multi" : ""}">${res.runs.map(r => runCard(r, res.account_currency, res.split)).join("")}</div>`;
   document.querySelectorAll("#recent [data-job]").forEach(el => el.setAttribute("aria-current", String(el.dataset.job === shown)));
 }
 
