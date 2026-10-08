@@ -84,6 +84,7 @@ class BacktestBody(BaseModel):
     days: int = 90
     set: dict[str, str] = Field(default_factory=dict)  # setting -> value for this run
     vary: dict[str, str] = Field(default_factory=dict)  # setting -> "v1,v2" to compare
+    model: bool = False  # also ask the decision model about every trade (OpenRouter calls)
 
 
 # Experiment settings the backtest page offers to change: the ones the rules and the risk engine use
@@ -872,7 +873,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         for slug in body.experiments:
             check_experiment(config, slug)
         try:
-            params = job_params(body.experiments, body.days, body.set, body.vary)
+            params = job_params(body.experiments, body.days, body.set, body.vary, body.model)
             job = backtests.start(params, lambda: load_config(database, fresh=True))
         except store.ConfigError as exc:
             raise HTTPException(400, str(exc)) from None

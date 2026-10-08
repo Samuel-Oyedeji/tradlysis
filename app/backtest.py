@@ -93,6 +93,8 @@ class SimTrade:
     best_r: float = 0.0  # max favourable excursion
     worst_r: float = 0.0  # max adverse excursion
     ambiguous: bool = False  # stop and target in the same candle (counted as the stop)
+    snapshot: dict[str, Any] | None = None  # what the model would have seen (model evaluation only)
+    model: dict[str, Any] | None = None  # the model's answer: decision, confidence, taken
 
     @property
     def long(self) -> bool:
@@ -112,6 +114,7 @@ class SimTrade:
             "risk_pips": self.risk_pips, "closed": self.closed.isoformat() if self.closed else None,
             "exit": self.exit, "outcome": self.outcome, "r": round(self.r, 2), "pnl": round(self.pnl, 2),
             "best_r": round(self.best_r, 2), "worst_r": round(self.worst_r, 2), "ambiguous": self.ambiguous,
+            **({"model": self.model} if self.model is not None else {}),
         }
 
 
@@ -158,6 +161,7 @@ class Run:
     settings: Settings
     capital: Decimal
     variant: dict[str, str] = field(default_factory=dict)
+    capture_snapshots: bool = False  # keep each trade's model snapshot (for evaluate_model)
     # simulated account
     balance: Decimal = Decimal(0)
     peak: Decimal = Decimal(0)
@@ -281,7 +285,9 @@ def replay(
                     run.near_misses[failed[0]] += 1
                 continue
             run.setups += 1
-            _try_entry(run, history.info, result, now, bid, ask, nav, quote_rate, base_rate, account_currency)
+            opened = _try_entry(run, history.info, result, now, bid, ask, nav, quote_rate, base_rate, account_currency)
+            if opened is not None and run.capture_snapshots:
+                opened.snapshot = model_snapshot(tech, result, history.instrument, now, bid, ask)
     if progress:
         progress(1.0)
 
@@ -289,7 +295,7 @@ def replay(
 def _try_entry(
     run: Run, info: InstrumentInfo, result: StrategyResult, now: datetime, bid: float, ask: float,
     nav: Decimal, quote_rate: float | None, base_rate: float | None, account_currency: str,
-) -> None:
+) -> SimTrade | None:
     plan = result.trade_plan
     assert plan is not None
     t = run.position
@@ -314,7 +320,7 @@ def _try_entry(
         run.peak = nav
     if not risk.approved:
         run.risk_blocks.update(risk.rejection_reasons)
-        return
+        return None
     assert risk.entry is not None and risk.stop_loss is not None and risk.take_profit is not None
     assert risk.units is not None
     run.position = SimTrade(
@@ -324,6 +330,89 @@ def _try_entry(
     )
     run.trades.append(run.position)
     run.last_entry[plan.direction] = now
+    return run.position
+
+
+# ---------------------------------------------------------------------- the decision model
+
+
+def model_snapshot(
+    tech: Any, result: StrategyResult, instrument: str, now: datetime, bid: float, ask: float
+) -> dict[str, Any]:
+    """The snapshot the engine would have sent the model for this setup (``build_snapshot``). There is
+    no historical news calendar, so the news section is neutral (no events, low risk)."""
+    from app.market_data.state import PriceTick
+    from app.news.state import NewsState
+    from app.snapshot.builder import build_snapshot
+
+    news = NewsState(risk="low", blackout=False, blackout_events=[], next_high_impact=None, upcoming=[],
+                     recent=[], currency_bias={}, calendar_fresh=True)
+    return build_snapshot(tech=tech, tick=PriceTick(instrument, now, bid, ask), news=news, strategy=result,
+                          decision_time=now, market_regime=tech.market_regime(False))
+
+
+MODEL_CONCURRENCY = 4
+MAX_MODEL_CALLS = 600
+
+
+async def evaluate_model(runs: list[Run], llm: Any, progress: Callable[[str], None] | None = None) -> None:
+    """Ask each run's decision model about every trade the rules took, as the live engine would have
+    (same prompt, model and settings). A trade is *taken* when the model confirms its direction with
+    at least the experiment's MIN_DECISION_CONFIDENCE; otherwise the model would have skipped it."""
+    from app.decision.service import DecisionService
+    from app.strategy.registry import STRATEGIES
+
+    jobs = [(run, t) for run in runs for t in run.trades if t.snapshot is not None]
+    if len(jobs) > MAX_MODEL_CALLS:
+        raise ConfigError(f"{len(jobs)} trades to ask the model about; at most {MAX_MODEL_CALLS} per backtest "
+                          "(choose fewer experiments, variants or days)")
+    deciders = {
+        run.label: DecisionService(llm, run.settings.openrouter_model, run.settings.llm_max_tokens,
+                                   run.settings.llm_temperature, STRATEGIES[run.strategy].prompt)
+        for run in runs
+    }
+    gate = asyncio.Semaphore(MODEL_CONCURRENCY)
+    done = 0
+
+    async def ask(run: Run, t: SimTrade) -> None:
+        nonlocal done
+        async with gate:
+            out = await deciders[run.label].decide(t.snapshot or {})
+        taken = bool(out.valid and out.decision == t.direction and out.confidence is not None
+                     and out.confidence >= run.settings.min_decision_confidence)
+        t.model = {"decision": out.decision, "confidence": out.confidence, "taken": taken,
+                   "error": None if out.valid else (out.validation_error or "invalid")[:200]}
+        t.snapshot = None  # done with it
+        done += 1
+        if progress and done % 10 == 0:
+            progress(f"asked the model about {done} of {len(jobs)} trades")
+
+    await asyncio.gather(*(ask(run, t) for run, t in jobs))
+
+
+def model_summary(run: Run, split: datetime) -> dict[str, Any] | None:
+    """Rules alone vs rules + model, on the whole period and on the check period."""
+    asked = [t for t in run.trades if t.model is not None]
+    if not asked:
+        return None
+    taken = [t for t in asked if t.model and t.model["taken"]]
+    skipped = [t for t in asked if t.model and not t.model["taken"]]
+    out = {
+        "asked": len(asked),
+        "errors": sum(1 for t in asked if t.model and t.model["error"]),
+        "rules_only": segment(asked),
+        "taken": segment(taken),
+        "skipped": segment(skipped),
+        "check_rules_only": segment([t for t in asked if t.opened >= split]),
+        "check_taken": segment([t for t in taken if t.opened >= split]),
+    }
+    t_avg = out["taken"]["total_r"] / out["taken"]["trades"] if out["taken"]["trades"] else None
+    s_avg = out["skipped"]["total_r"] / out["skipped"]["trades"] if out["skipped"]["trades"] else None
+    out["taken_avg_r"] = None if t_avg is None else round(t_avg, 3)
+    out["skipped_avg_r"] = None if s_avg is None else round(s_avg, 3)
+    # The model helps when the trades it keeps beat the ones it drops.
+    out["edge_per_trade_r"] = None if t_avg is None or s_avg is None else round(t_avg - s_avg, 3)
+    return out
 
 
 # ---------------------------------------------------------------------- results
@@ -384,10 +473,13 @@ def selection(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "check_trades": best["check"]["trades"],
             "check_rank": by_check.index(best) + 1,
             "variants": len(group),
-            "holds": best["check"]["total_r"] > 0 and by_check.index(best) < (len(group) + 1) // 2,
-            # holds: still profitable and among the better half; mixed: profitable but others did better;
-            # fails: lost money on the period it was not chosen on
-            "outcome": "fails" if best["check"]["total_r"] <= 0
+            "holds": best["tuning"]["total_r"] > 0 and best["check"]["total_r"] > 0
+            and by_check.index(best) < (len(group) + 1) // 2,
+            # none: no variant made money on the tuning period, so there was nothing worth choosing;
+            # holds: still profitable on the check period and among the better half there; mixed:
+            # profitable but others did better; fails: lost money on the period it was not chosen on
+            "outcome": "none" if best["tuning"]["total_r"] <= 0
+            else "fails" if best["check"]["total_r"] <= 0
             else "holds" if by_check.index(best) < (len(group) + 1) // 2 else "mixed",
         })
     return out
@@ -482,7 +574,8 @@ def render(result: dict[str, Any], *, trades: bool = False) -> str:
             lines.append(
                 f"  → best on the tuning period: {sel['label']} ({sel['tuning_r']:+.1f}R); on the check period "
                 f"{sel['check_r']:+.1f}R over {sel['check_trades']} trades, #{sel['check_rank']} of {sel['variants']}: "
-                + {"holds": "holds up",
+                + {"none": "no variant made money on the tuning period, so none can be chosen",
+                   "holds": "holds up",
                    "mixed": "still profitable, but another variant did better there (the choice is likely luck)",
                    "fails": "does NOT hold up (likely luck)"}[sel.get("outcome", "holds" if sel["holds"] else "fails")]
             )
@@ -508,6 +601,15 @@ def render(result: dict[str, Any], *, trades: bool = False) -> str:
                 f"{r['check']['total_r']:+.1f}R ({r['check']['trades']} trades) · by quarter "
                 + " ".join(f"{q['total_r']:+.1f}" for q in r["quarters"])
                 + f" (positive in {r['positive_quarters']} of {len(r['quarters'])})"
+            )
+        m = r.get("model")
+        if m:
+            lines.append(
+                f"  model: asked about {m['asked']} trades ({m['errors']} errors) · took {m['taken']['trades']} "
+                f"({m['taken']['total_r']:+.1f}R, avg {_fmt(m['taken_avg_r'], '+.2f')}R) · skipped {m['skipped']['trades']} "
+                f"({m['skipped']['total_r']:+.1f}R, avg {_fmt(m['skipped_avg_r'], '+.2f')}R) · rules alone "
+                f"{m['rules_only']['total_r']:+.1f}R · check period: with model {m['check_taken']['total_r']:+.1f}R vs "
+                f"rules alone {m['check_rules_only']['total_r']:+.1f}R"
             )
         lines.append(f"  rules that blocked: {_top(r['rule_failures'])}")
         lines.append(f"  near misses (one rule failed): {_top(r['near_misses'])}")
@@ -636,11 +738,15 @@ async def backtest(
     vary: dict[str, list[str]] | None = None,
     end: datetime | None = None,
     progress: Callable[[str], None] | None = None,
+    llm: Any = None,
 ) -> dict[str, Any]:
-    """Run the backtest and return the results (``render`` turns them into text)."""
+    """Run the backtest and return the results (``render`` turns them into text). With ``llm`` (an
+    ``OpenRouterClient``), the decision model is also asked about every trade (``evaluate_model``)."""
     if not 1 <= days <= MAX_DAYS:
         raise ConfigError(f"days must be 1-{MAX_DAYS}")
     runs = build_runs(select_experiments(config, slugs), sets or {}, vary or {})
+    for r in runs:
+        r.capture_snapshots = llm is not None
     end = end or utcnow()
     end = end.replace(minute=end.minute - end.minute % 15, second=0, microsecond=0)
     start = end - timedelta(days=days)
@@ -672,8 +778,13 @@ async def backtest(
             progress=lambda f, i=instrument: say(f"{i}: {f:.0%} replayed"),
         )
         warnings += history_warnings(instrument, mine, start, history.problems)
+    if llm is not None:
+        say("asking the decision model about each trade")
+        await evaluate_model(runs, llm, say)
     split = end - (end - start) * CHECK_FRACTION
-    summaries = [{**summarize(r, days), **periods(r, start, end, split)} for r in runs]
+    summaries = [
+        {**summarize(r, days), **periods(r, start, end, split), "model": model_summary(r, split)} for r in runs
+    ]
     return {
         "start": start.isoformat(),
         "end": end.isoformat(),
@@ -756,7 +867,9 @@ class CandleFileClient:
 # ---------------------------------------------------------------------- jobs (dashboard + data API)
 
 
-def job_params(experiments: list[str] | None, days: int, sets: dict[str, str], vary: dict[str, str]) -> dict[str, Any]:
+def job_params(
+    experiments: list[str] | None, days: int, sets: dict[str, str], vary: dict[str, str], model: bool = False
+) -> dict[str, Any]:
     """Validated, normalised parameters of a backtest started over HTTP (raises ConfigError)."""
     if not 1 <= days <= MAX_DAYS:
         raise ConfigError(f"days must be 1-{MAX_DAYS}")
@@ -766,7 +879,7 @@ def job_params(experiments: list[str] | None, days: int, sets: dict[str, str], v
     if clash:
         raise ConfigError(f"{', '.join(sorted(clash))}: set and compared at once")
     variants(v)
-    return {"experiment": sorted(set(experiments or [])), "days": days, "set": s, "vary": v}
+    return {"experiment": sorted(set(experiments or [])), "days": days, "set": s, "vary": v, "model": bool(model)}
 
 
 class BacktestBusy(Exception):
@@ -849,11 +962,14 @@ class BacktestJobs:
             config = await load_config()
             slugs = p["experiment"] or None
             client = make_client(config.settings, select_experiments(config, slugs))
+            llm = make_llm(config.settings) if p.get("model") else None
             try:
                 job.result = await backtest(config, client, slugs=slugs, days=p["days"], sets=p["set"],
-                                            vary=p["vary"], progress=note)
+                                            vary=p["vary"], progress=note, llm=llm)
             finally:
                 await client.aclose()
+                if llm is not None:
+                    await llm.aclose()
             job.status, job.progress = "done", "done"
         except Exception as exc:  # reported to whoever polls the job
             job.status, job.error = "failed", f"{type(exc).__name__}: {exc}" if not isinstance(exc, ConfigError) else str(exc)
@@ -861,9 +977,19 @@ class BacktestJobs:
             job.finished_at = utcnow()
 
 
+def make_llm(settings: Settings) -> Any:
+    """The OpenRouter client the engine uses, for asking the decision model (``evaluate_model``)."""
+    from app.decision.openrouter import OpenRouterClient
+
+    if not settings.openrouter_api_key:
+        raise ConfigError("no OpenRouter API key is configured, so the model cannot be asked")
+    return OpenRouterClient(settings.openrouter_api_key, settings.openrouter_base_url, settings.openrouter_app_url,
+                            settings.openrouter_app_name, timeout=settings.llm_timeout_seconds)
+
+
 async def run_from_db(
     base: Settings, *, slugs: list[str] | None, days: int, sets: dict[str, str], vary: dict[str, list[str]],
-    progress: Callable[[str], None] | None = None,
+    progress: Callable[[str], None] | None = None, model: bool = False,
 ) -> dict[str, Any]:
     from app.db.session import Database
 
@@ -873,10 +999,13 @@ async def run_from_db(
     finally:
         await db.dispose()
     client = make_client(config.settings, select_experiments(config, slugs))
+    llm = make_llm(config.settings) if model else None
     try:
-        return await backtest(config, client, slugs=slugs, days=days, sets=sets, vary=vary, progress=progress)
+        return await backtest(config, client, slugs=slugs, days=days, sets=sets, vary=vary, progress=progress, llm=llm)
     finally:
         await client.aclose()
+        if llm is not None:
+            await llm.aclose()
 
 
 def main() -> int:
@@ -887,6 +1016,8 @@ def main() -> int:
     parser.add_argument("--vary", action="append", default=[], metavar="KEY=V1,V2",
                         help="compare values of a setting (repeatable: every combination)")
     parser.add_argument("--trades", action="store_true", help="list every trade")
+    parser.add_argument("--model", action="store_true",
+                        help="also ask the decision model about every trade (OpenRouter calls: one per trade)")
     parser.add_argument("--json", action="store_true", help="print the results as JSON")
     args = parser.parse_args()
     try:
@@ -894,7 +1025,7 @@ def main() -> int:
         vary = parse_assignments(args.vary, multi=True)
         result = asyncio.run(run_from_db(
             get_settings(), slugs=args.experiment, days=args.days, sets=sets, vary=vary,
-            progress=lambda m: print(m, file=sys.stderr),
+            progress=lambda m: print(m, file=sys.stderr), model=args.model,
         ))
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
