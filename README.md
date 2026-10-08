@@ -350,7 +350,15 @@ The same runs over HTTPS: `GET /api/data/backtest?experiment=<slug>&days=90&vary
 starts one (one at a time) and returns its progress; repeat the URL until `status` is `done`.
 
 It reports trades per week, win rate, total and average R, profit factor, drawdown, what blocked
-the rest of the candles and the near misses. Read it as an upper bound on how often the
+the rest of the candles and the near misses.
+
+**Out-of-sample check.** Every backtest is split in two: the *tuning* period (the first two-thirds)
+and the *check* period (the last third), plus results by quarter. Pick settings by their tuning
+results only, then look at the check column: a setting that was best on the tuning period and is
+still profitable on the check period (which it was not chosen on) has a real chance of holding up
+live; one that falls apart there was luck. With `--vary`, the report says this for you ("holds
+up", "mixed" or "does not hold up"). A result that is positive overall but negative in most
+quarters is flagged as not steady. Read it as an upper bound on how often the
 experiment trades: it treats every setup as if the model agreed, has no news blackout, and counts
 a candle that touches both stop and target as a loss. It reads candles only; it never places
 orders or writes to the database.
@@ -457,6 +465,22 @@ place orders.
      beyond the edge), capped at 4R. Stop distance and the experiment's minimum R:R apply.
      These plans usually land around 1.2–2R, so run breakout experiments with a minimum R:R
      of about 1.5.
+
+   **Trend following (4h)** (`app/strategy/trend_following.py`) is the slow, hold-for-days approach
+   with the most published support for FX majors (time-series momentum).
+   - Trend: 4h EMA50 above EMA200 (longs) or below (shorts).
+   - Signal: the latest completed 4h candle closes beyond the high/low of the 20 4h candles before
+     it, in the trend's direction, and it is the first such close; it is taken within 60 minutes of
+     that 4h candle closing.
+   - Stop 1.5× ATR(4h) from the entry; target 2.5R. 4h stops are wide (often 30–60 pips), so give
+     these experiments a higher *Max stop (pips)*, e.g. 80.
+
+   **London breakout** (`app/strategy/session_breakout.py`) trades the first break of the quiet
+   overnight range when London opens. Hours are London time, so it follows British summer time.
+   - Range: the high and low of today's 1h candles from 00:00 to 08:00, 1.5–6× ATR(1h) tall.
+   - Entries 08:00–12:00 on weekdays: the latest 15m candle closes beyond the range by 0.1× ATR(15m),
+     and it is the first close beyond it since 08:00.
+   - Stop in the middle of the range (at least the minimum stop); target 2R.
    All of these are experiment settings on the Config page.
 5. **Market snapshot** is built and stored in `decision_requests` (unique per candle, so a
    restart never processes a candle twice).

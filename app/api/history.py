@@ -32,7 +32,8 @@ from app.db.models import (
 DECISION_BAR = timedelta(minutes=15)
 HYPOTHETICAL_HORIZON = timedelta(days=5)
 PIP = 0.0001  # the pairs traded so far (EUR/USD, GBP/USD) quote in 0.0001 pips
-SETUP_LABELS = {"TREND_PULLBACK": "Trend-pullback", "RANGE_BREAKOUT": "Range-breakout"}
+SETUP_LABELS = {"TREND_PULLBACK": "Trend-pullback", "RANGE_BREAKOUT": "Range-breakout",
+                "TREND_FOLLOWING": "Trend-following", "LONDON_BREAKOUT": "London-breakout"}
 
 # --------------------------------------------------------------------------- outcome
 
@@ -220,7 +221,8 @@ def build_timeline(chain: Chain, hypothetical: dict[str, Any] | None = None) -> 
             "setup", f"{SETUP_LABELS.get(strat.get('setup'), 'Setup')} setup " + ("found" if strat.get("candidate") else "not complete"),
             "pass" if strat.get("candidate") else "fail", req.created_at,
             (f"{strat.get('direction')} setup" if strat.get("direction")
-             else "No breakout" if strat.get("setup") == "RANGE_BREAKOUT" else "No higher-timeframe direction")
+             else "No breakout" if "BREAKOUT" in str(strat.get("setup")) else "No signal" if strat.get("setup") == "TREND_FOLLOWING"
+             else "No higher-timeframe direction")
             + ("" if strat.get("candidate") else f" · failed: {', '.join(strat.get('failure_codes', []))}"),
             plan_details, conds,
         ))

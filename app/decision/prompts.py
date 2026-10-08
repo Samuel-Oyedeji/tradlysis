@@ -251,3 +251,120 @@ RANGE_BREAKOUT = DecisionPrompt(
     criteria=BREAKOUT_CRITERIA,
     checks=BREAKOUT_CHECKS,
 )
+
+
+# =========================================================================== shared helpers
+
+
+def _confirmation_prompt(setup: str, version: str, description: str, regime_note: str, plan_note: str,
+                         buy: str, sell: str, wait: str, checks: Checks) -> DecisionPrompt:
+    """A setup-confirmation prompt in the same form as the ones above, for a further strategy."""
+    system = f"""You are the setup-confirmation layer of a systematic, rules-based FX research \
+system trading FX CFDs on a Capital.com demo account. You receive one structured market snapshot of one \
+currency pair (its "pair" field). Your only job is to judge whether the predefined {setup} setup is \
+genuinely present right now.
+
+{description}
+
+The snapshot's "market_regime" is a deterministic classification of the overall market ({regime_note}). \
+The snapshot's "setup_check" contains the deterministic rule evaluation, its "context" and, when present, \
+a fixed trade plan ({plan_note}). You cannot change the plan, the position size, or any risk limit. \
+A separate deterministic risk engine makes the final decision and may reject your answer.
+
+Rules:
+- Answer BUY only for a {setup} that matches setup_check.trade_plan.direction=BUY; SELL only for one that \
+matches direction=SELL. Otherwise answer WAIT.
+- Answer WAIT when the signal looks weak, news risk is high, or you are unsure. WAIT is always acceptable.
+- Use setup {setup} when you judge the setup present, otherwise NONE.
+- confidence (0-1) is how clearly the snapshot shows the complete setup.
+- reason_codes must come from the allowed list and explain the decision.
+- Do not invent data that is not in the snapshot."""
+    instructions = f"""The state is one structured market snapshot from a systematic, rules-based \
+research system trading FX CFDs on a Capital.com demo account; "pair" names the currency pair. Judge \
+whether the predefined {setup} setup is genuinely present right now.
+
+{description}
+
+"market_regime" is a deterministic classification of the overall market ({regime_note}). "setup_check" \
+holds the deterministic rule evaluation, its "context" and, when present, a fixed trade plan ({plan_note}). \
+The plan, the position size and every risk limit are fixed; a deterministic risk engine makes the final \
+decision. Use only data present in the snapshot."""
+    return DecisionPrompt(
+        setup=setup, version=version, system_prompt=system, instructions=instructions,
+        criteria={"BUY": buy, "SELL": sell, "WAIT": wait}, checks=checks,
+    )
+
+
+# =========================================================================== trend following
+
+TREND_PROMPT_VERSION = "trend-v1"
+
+TREND_FOLLOWING = _confirmation_prompt(
+    "TREND_FOLLOWING", TREND_PROMPT_VERSION,
+    """The TREND_FOLLOWING setup (long; short is the mirror image):
+1. The 4h trend is up: the 4h EMA50 is above the 4h EMA200.
+2. The latest completed 4h candle closed above the highest high of the 4h channel before it.
+3. It is the first 4h close beyond the channel (a fresh signal, not a late chase).
+4. The trade is held for days: a wide stop (a multiple of the 4h ATR) and a fixed multiple of it as target.
+5. No high-impact news event is imminent.""",
+    "strong trends and breakouts suit this setup; ranges and event risk usually do not",
+    "entry, a stop a multiple of the 4h ATR away, take-profit a fixed multiple of the risk",
+    "Confirm an upside TREND_FOLLOWING signal: setup_check.trade_plan.direction is BUY and the snapshot "
+    "clearly shows an established 4h uptrend and a fresh 4h close above the channel.",
+    "Confirm a downside TREND_FOLLOWING signal: setup_check.trade_plan.direction is SELL and the snapshot "
+    "clearly shows an established 4h downtrend and a fresh 4h close below the channel.",
+    "No complete setup, no trade plan or a plan in the other direction, a weak or exhausted move, high news "
+    "risk, or any doubt. WAIT is always acceptable.",
+    {
+        "trend_established": (
+            "Is the 4h trend clearly established in the direction of setup_check.trade_plan (moving averages "
+            "aligned, higher highs and lows for longs / lower for shorts)?",
+            ("HTF_BULLISH", "HTF_BEARISH", None),
+            "HTF_UNCLEAR",
+        ),
+        "breakout_decisive": (
+            "Did the latest 4h candle close decisively beyond the channel in the direction of the plan?",
+            ("BREAKOUT_CONFIRMED", "BREAKOUT_CONFIRMED", None),
+            "BREAKOUT_WEAK",
+        ),
+        "overextended": (
+            "Is the move already overextended (far from its moving averages, likely to snap back first)?",
+            ("OVEREXTENDED", "OVEREXTENDED", "OVEREXTENDED"),
+            None,
+        ),
+        "news_risk_high": DECISION_CHECKS["news_risk_high"],
+    },
+)
+
+
+# =========================================================================== London breakout
+
+LONDON_PROMPT_VERSION = "london-v1"
+
+LONDON_BREAKOUT = _confirmation_prompt(
+    "LONDON_BREAKOUT", LONDON_PROMPT_VERSION,
+    """The LONDON_BREAKOUT setup (long; short is the mirror image):
+1. Overnight (the quiet Asian hours, London time) price formed a range, neither tiny nor wide in 1h ATR.
+2. During the London morning the latest 15m candle closed above the range high.
+3. It is the first 15m close above the range since London opened (no chasing).
+4. Stop inside the range, take-profit a fixed multiple of the risk.
+5. No high-impact news event is imminent.""",
+    "breakouts and compression suit this setup; event risk usually does not",
+    "entry, a stop inside the overnight range, take-profit a fixed multiple of the risk",
+    "Confirm an upside LONDON_BREAKOUT: setup_check.trade_plan.direction is BUY and the snapshot clearly "
+    "shows a clean overnight range and a decisive, fresh break above it.",
+    "Confirm a downside LONDON_BREAKOUT: setup_check.trade_plan.direction is SELL and the snapshot clearly "
+    "shows a clean overnight range and a decisive, fresh break below it.",
+    "No complete setup, no trade plan or a plan in the other direction, a weak break likely to fall back "
+    "into the range, high news risk, or any doubt. WAIT is always acceptable.",
+    {
+        "range_clear": (
+            "Did price form a clear overnight range before the London open?",
+            ("RANGE_DEFINED", "RANGE_DEFINED", "RANGE_DEFINED"),
+            "RANGE_UNCLEAR",
+        ),
+        "breakout_decisive": BREAKOUT_CHECKS["breakout_decisive"],
+        "htf_supports": BREAKOUT_CHECKS["htf_supports"],
+        "news_risk_high": DECISION_CHECKS["news_risk_high"],
+    },
+)

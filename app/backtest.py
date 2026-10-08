@@ -45,6 +45,7 @@ from app.broker.types import InstrumentInfo
 from app.config.settings import Settings, get_settings
 from app.config.store import (
     ENV_ONLY_KEYS,
+    FIELD_BY_KEY,
     SECRET_KEYS,
     ConfigError,
     Configuration,
@@ -328,6 +329,70 @@ def _try_entry(
 # ---------------------------------------------------------------------- results
 
 
+CHECK_FRACTION = 1 / 3  # the last third of a backtest is the check period
+QUARTERS = 4
+
+
+def segment(trades: list[SimTrade]) -> dict[str, Any]:
+    """Results of the closed trades among ``trades``."""
+    closed = [t for t in trades if t.outcome != "OPEN"]
+    wins = [t for t in closed if t.r > 0]
+    loss = -sum(t.r for t in closed if t.r <= 0)
+    return {
+        "trades": len(closed),
+        "total_r": round(sum(t.r for t in closed), 2),
+        "win_rate": round(len(wins) / len(closed), 3) if closed else None,
+        "profit_factor": round(sum(t.r for t in wins) / loss, 2) if loss else None,
+    }
+
+
+def periods(run: Run, start: datetime, end: datetime, split: datetime) -> dict[str, Any]:
+    """Out-of-sample view: the tuning period (before ``split``), the check period (after) and quarters.
+
+    Trades belong to the period they were opened in. Settings should be chosen on the tuning period
+    only; the check period then shows whether the choice holds on data it was not chosen on.
+    """
+    step = (end - start) / QUARTERS
+    quarters = []
+    for i in range(QUARTERS):
+        lo, hi = start + step * i, start + step * (i + 1)
+        quarters.append({"start": lo.isoformat(), **segment([t for t in run.trades if lo <= t.opened < hi])})
+    return {
+        "tuning": segment([t for t in run.trades if t.opened < split]),
+        "check": segment([t for t in run.trades if t.opened >= split]),
+        "quarters": quarters,
+        "positive_quarters": sum(1 for q in quarters if q["total_r"] > 0),
+    }
+
+
+def selection(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """For each experiment backtested with several variants: the best on the tuning period, and how
+    it then did on the check period (its rank among the variants there)."""
+    out = []
+    for slug in dict.fromkeys(r["experiment"] for r in runs):
+        group = [r for r in runs if r["experiment"] == slug]
+        if len(group) < 2:
+            continue
+        best = max(group, key=lambda r: r["tuning"]["total_r"])
+        by_check = sorted(group, key=lambda r: -r["check"]["total_r"])
+        out.append({
+            "experiment": slug,
+            "label": best["label"],
+            "variant": best["variant"],
+            "tuning_r": best["tuning"]["total_r"],
+            "check_r": best["check"]["total_r"],
+            "check_trades": best["check"]["trades"],
+            "check_rank": by_check.index(best) + 1,
+            "variants": len(group),
+            "holds": best["check"]["total_r"] > 0 and by_check.index(best) < (len(group) + 1) // 2,
+            # holds: still profitable and among the better half; mixed: profitable but others did better;
+            # fails: lost money on the period it was not chosen on
+            "outcome": "fails" if best["check"]["total_r"] <= 0
+            else "holds" if by_check.index(best) < (len(group) + 1) // 2 else "mixed",
+        })
+    return out
+
+
 def summarize(run: Run, days: int) -> dict[str, Any]:
     closed = [t for t in run.trades if t.outcome != "OPEN"]
     wins = [t for t in closed if t.r > 0]
@@ -401,14 +466,25 @@ def render(result: dict[str, Any], *, trades: bool = False) -> str:
         lines.append(f"  WARNING: {w}")
     lines.append("")
     runs = result["runs"]
+    split = (result.get("split") or "")[:10]
     if len({r["experiment"] for r in runs}) < len(runs):
-        lines.append("Variants:")
-        lines.append(f"  {'run':<58} {'trades':>6} {'/wk':>5} {'win%':>5} {'total R':>8} {'PF':>5} {'maxDD R':>8}")
+        lines.append(f"Variants (tuning = before {split}, check = from {split}; choose on tuning, trust the check):")
+        lines.append(f"  {'run':<58} {'trades':>6} {'/wk':>5} {'win%':>5} {'total R':>8} {'PF':>5} {'maxDD R':>8}"
+                     f" {'tuning R':>9} {'check R':>8}")
         for r in runs:
             win = _fmt(r["win_rate"] and r["win_rate"] * 100, ".0f")
             lines.append(
                 f"  {r['label'][:58]:<58} {r['trades']:>6} {_fmt(r['trades_per_week'], '.1f'):>5} {win:>5} "
                 f"{r['total_r']:>+8.1f} {_fmt(r['profit_factor'], '.2f'):>5} {r['max_drawdown_r']:>8.1f}"
+                + (f" {r['tuning']['total_r']:>+9.1f} {r['check']['total_r']:>+8.1f}" if "tuning" in r else "")
+            )
+        for sel in result.get("selection", []):
+            lines.append(
+                f"  → best on the tuning period: {sel['label']} ({sel['tuning_r']:+.1f}R); on the check period "
+                f"{sel['check_r']:+.1f}R over {sel['check_trades']} trades, #{sel['check_rank']} of {sel['variants']}: "
+                + {"holds": "holds up",
+                   "mixed": "still profitable, but another variant did better there (the choice is likely luck)",
+                   "fails": "does NOT hold up (likely luck)"}[sel.get("outcome", "holds" if sel["holds"] else "fails")]
             )
         lines.append("")
     for r in runs:
@@ -425,6 +501,13 @@ def render(result: dict[str, Any], *, trades: bool = False) -> str:
                 f"  money: {r['pnl']:+.2f} on {r['capital']:g} ({r['return_pct']:+.2f}%, "
                 f"{r['risk_per_trade_pct']}% risk per trade) · avg held {_fmt(r['avg_hours_held'], '.1f')}h"
                 + (f" · {r['ambiguous_candles']} stop+target candle(s) counted as losses" if r["ambiguous_candles"] else "")
+            )
+        if "quarters" in r:
+            lines.append(
+                f"  out of sample: tuning {r['tuning']['total_r']:+.1f}R ({r['tuning']['trades']} trades) · check "
+                f"{r['check']['total_r']:+.1f}R ({r['check']['trades']} trades) · by quarter "
+                + " ".join(f"{q['total_r']:+.1f}" for q in r["quarters"])
+                + f" (positive in {r['positive_quarters']} of {len(r['quarters'])})"
             )
         lines.append(f"  rules that blocked: {_top(r['rule_failures'])}")
         lines.append(f"  near misses (one rule failed): {_top(r['near_misses'])}")
@@ -469,13 +552,22 @@ def variants(vary: dict[str, list[str]]) -> list[dict[str, str]]:
     return combos
 
 
+def applies(key: str, strategy: str) -> bool:
+    """Whether a setting matters to a strategy (strategy-specific settings name their strategies)."""
+    info = FIELD_BY_KEY.get(key)
+    return info is None or not info.strategies or strategy in info.strategies
+
+
 def build_runs(
     experiments: list[ExperimentConfig], sets: dict[str, str], vary: dict[str, list[str]]
 ) -> list[Run]:
     runs = []
     for exp in experiments:
-        for variant in variants(vary):
-            changes = {**sets, **variant}
+        # Settings only some strategies use (e.g. the London hours) leave the others' runs alone.
+        mine_set = {k: v for k, v in sets.items() if applies(k, exp.strategy)}
+        mine_vary = {k: v for k, v in vary.items() if applies(k, exp.strategy)}
+        for variant in variants(mine_vary):
+            changes = {**mine_set, **variant}
             values = exp.settings.model_dump()
             values.update(changes)
             values["trading_enabled"] = True  # the question is what the rules would do
@@ -580,14 +672,18 @@ async def backtest(
             progress=lambda f, i=instrument: say(f"{i}: {f:.0%} replayed"),
         )
         warnings += history_warnings(instrument, mine, start, history.problems)
+    split = end - (end - start) * CHECK_FRACTION
+    summaries = [{**summarize(r, days), **periods(r, start, end, split)} for r in runs]
     return {
         "start": start.isoformat(),
         "end": end.isoformat(),
+        "split": split.isoformat(),
         "days": days,
         "account_currency": account.currency,
         "history": coverage,
         "warnings": warnings,
-        "runs": [summarize(r, days) for r in runs],
+        "selection": selection(summaries),
+        "runs": summaries,
     }
 
 

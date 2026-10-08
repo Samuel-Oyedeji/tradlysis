@@ -32,7 +32,8 @@
   Strategy-only settings get `strategies=(...)` on their `FieldInfo`. Prompts never name a pair (the snapshot does).
 - Backtester: `app/backtest.py` replays broker candles through `evaluate_strategy` + `risk.evaluate` (no model, no
   news). It must keep using the engine's own functions (`compute_technical_state`, `BARS_PER_TF`) so it tests what
-  runs live; a new strategy needs nothing extra there. Served read-only at `/api/data/backtest`.
+  runs live; a new strategy needs nothing extra there. Served read-only at `/api/data/backtest`. Results are split
+  into a tuning period (first 2/3) and a check period (last 1/3) plus quarters, so variants are judged out of sample.
 - Bump a strategy's prompt version in `app/decision/prompts.py` (`PROMPT_VERSION` for trend pullback,
-  `BREAKOUT_PROMPT_VERSION`) whenever its prompt or questions change
+  `BREAKOUT_PROMPT_VERSION`, `TREND_PROMPT_VERSION`, `LONDON_PROMPT_VERSION`) whenever its prompt or questions change
   (`NEWS_PROMPT_VERSION` in `app/news/interpreter.py` for the news questions).
