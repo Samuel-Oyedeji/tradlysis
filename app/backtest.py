@@ -203,6 +203,7 @@ class History:
     instrument: str
     info: InstrumentInfo
     bars: dict[str, list[Bar]]  # M15, H1, H4, D, W, M ascending
+    problems: list[str] = field(default_factory=list)  # history windows the broker refused
 
 
 def _ends(granularity: str, bars: list[Bar]) -> list[datetime]:
@@ -394,8 +395,10 @@ def render(result: dict[str, Any], *, trades: bool = False) -> str:
     lines = [head]
     for instrument, tfs in result.get("history", {}).items():
         lines.append(f"  {instrument} candles: " + ", ".join(
-            f"{g} {v['candles']} from {(v['first'] or '–')[:10]}" for g, v in tfs.items()
+            f"{g} {v['candles']} from {(v['first'] or '–')[:10]}" for g, v in tfs.items() if isinstance(v, dict)
         ))
+    for w in result.get("warnings", []):
+        lines.append(f"  WARNING: {w}")
     lines.append("")
     runs = result["runs"]
     if len({r["experiment"] for r in runs}) < len(runs):
@@ -504,11 +507,28 @@ async def fetch_history(client: Any, instrument: str, start: datetime, end: date
 
     info = await client.get_instrument(instrument)
     bars = {}
+    problems: list[str] = []
     for g in ("M15", "H1", "H4", "D", "W"):
-        bars[g] = [b for b in await client.get_candles_between(g, start - WARMUP[g], end, instrument)
-                   if b.time + timedelta(seconds=GRANULARITY_SECONDS[g]) <= end]
+        got = await client.get_candles_between(g, start - WARMUP[g], end, instrument, problems)
+        bars[g] = [b for b in got if b.time + timedelta(seconds=GRANULARITY_SECONDS[g]) <= end]
     bars["M"] = monthly_bars(bars["D"], end)
-    return History(instrument, info, bars)
+    return History(instrument, info, bars, problems)
+
+
+def history_warnings(instrument: str, runs: list[Run], start: datetime, problems: list[str]) -> list[str]:
+    """Say plainly when the replay could not cover the period (so "no trades" is never a data gap)."""
+    out = []
+    name = instrument.replace("_", "/")
+    first = min((r.first for r in runs if r.first), default=None)
+    if first is None:
+        out.append(f"{name}: no candle could be replayed: the broker returned too little history "
+                   f"(the engine needs {MIN_BARS} candles on M15, H1 and H4 before each one).")
+    elif first - start > timedelta(days=3):
+        out.append(f"{name}: the replay starts on {first:%Y-%m-%d}, not {start:%Y-%m-%d}: "
+                   "the broker returned no earlier history.")
+    if problems:
+        out.append(f"{name}: the broker refused {len(problems)} history request(s), e.g. {problems[0]}.")
+    return out
 
 
 # ---------------------------------------------------------------------- entry points
@@ -537,6 +557,7 @@ async def backtest(
     account = await client.get_account()
     say = progress or (lambda _msg: None)
     coverage: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
     for instrument in dict.fromkeys(r.instrument for r in runs):
         mine = [r for r in runs if r.instrument == instrument]
         say(f"{instrument}: downloading candles")
@@ -545,6 +566,7 @@ async def backtest(
             g: {"candles": len(b), "first": b[0].time.isoformat() if b else None}
             for g, b in history.bars.items() if g in ("M15", "H1", "H4")
         }
+        coverage[instrument]["refused_requests"] = len(history.problems)
         cross: dict[str, float] = {}
         base, _, quote = instrument.partition("_")
         if account.currency not in (base, quote):
@@ -557,12 +579,14 @@ async def backtest(
             replay, history, mine, start, end, account_currency=account.currency, cross_rates=cross,
             progress=lambda f, i=instrument: say(f"{i}: {f:.0%} replayed"),
         )
+        warnings += history_warnings(instrument, mine, start, history.problems)
     return {
         "start": start.isoformat(),
         "end": end.isoformat(),
         "days": days,
         "account_currency": account.currency,
         "history": coverage,
+        "warnings": warnings,
         "runs": [summarize(r, days) for r in runs],
     }
 

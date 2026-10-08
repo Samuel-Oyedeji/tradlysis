@@ -230,6 +230,7 @@ function progressText(job) {
 
 function verdict(r) {
   const top = Object.keys(r.rule_failures)[0];
+  if (!r.cycles) return ["bad", "Nothing was replayed: too little candle history came back from the broker (see the warning above)."];
   if (!r.trades) return ["bad", `No trades in ${r.cycles} candles. ${top ? `The rule that blocked most often: ${pretty(top)}.` : ""} Try a longer period or loosen that rule.`];
   if (r.closed < 10) return ["warn", `Only ${r.closed} closed trade${r.closed === 1 ? "" : "s"}: too few to judge. Try a longer period.`];
   if (r.total_r > 0 && (r.profit_factor ?? 99) >= 1.3) return ["good", `Promising: ${fmt(r.closed, 0)} trades made ${fmt(r.total_r, 1)}R, a profit factor of ${fmt(r.profit_factor)}. Compare it with the live results once it trades.`];
@@ -334,6 +335,7 @@ function show(job) {
   $("results").innerHTML = `<div class="page-h" style="margin-top:20px"><h1 style="font-size:17px">Results</h1>
       <span class="muted">${esc(new Date(res.start).toLocaleDateString())} – ${esc(new Date(res.end).toLocaleDateString())} (${res.days} days)</span></div>
     ${hist ? `<div class="muted" style="font-size:12px">${esc(hist)}</div>` : ""}
+    ${(res.warnings || []).map(w => `<div class="banner" style="display:block;margin:12px 0 0">${esc(w)}</div>`).join("")}
     ${comparison(res.runs)}${res.runs.map(r => runCard(r, res.account_currency)).join("")}`;
   document.querySelectorAll("#recent [data-job]").forEach(el => el.setAttribute("aria-current", String(el.dataset.job === shown)));
 }
