@@ -299,6 +299,27 @@ a running decision cycle finish, then restarts itself (in the same process) with
 configuration. The trading mode stays in `.env`, so a stolen dashboard password can never
 switch on real money.
 
+### Read-only data API (`/api/data`)
+
+For analysis tools and assistants that cannot reach the database itself (it only speaks HTTPS,
+through the same server as the dashboard). Off until you set **Data API → Read-only API token**
+(24+ characters) on the Config page; calls send it as `Authorization: Bearer <token>`. It is
+separate from the dashboard login, so you can hand it out and change it on its own.
+
+- Read-only: GET only, and every query runs in a read-only transaction.
+- Only the bot's own tables, never other tables in the shared database; there is no raw-SQL
+  endpoint. Secret settings (broker, OpenRouter, Telegram, this token) are masked.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" https://<your-host>/api/data/diagnose?days=7      # where cycles stop
+curl -H "Authorization: Bearer $TOKEN" https://<your-host>/api/data/tables               # tables, columns, row counts
+curl -H "Authorization: Bearer $TOKEN" "https://<your-host>/api/data/tables/decision_requests?f.experiment=eurusd-breakout&since=2026-10-06T00:00:00Z&limit=200&columns=candle_time,strategy_result"
+```
+
+Rows: `limit` (max 1000) and `offset` (`has_more` says whether to page on), `order=column` or
+`-column`, `columns=a,b`, `since`/`until` on the table's time column, and `f.<column>=<value>`
+filters (`null` matches empty). `python -m app.diagnose` prints the same diagnosis locally.
+
 ### Analysis page (`/analysis`)
 
 Linked from the navigation and from the *Experiment analysis* button on the overview. It shows

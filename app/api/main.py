@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import Date, cast, desc, func, select
 
+from app.api import data as data_api
 from app.api import history
 from app.config import store
 from app.config.settings import Settings, get_settings
@@ -167,6 +168,9 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
 
     async def get_config(database: Database = Depends(get_db)) -> Configuration:
         return await load_config(database)
+
+    # Read-only data API for analysis tools (bearer token, not the dashboard login).
+    app.include_router(data_api.build_router(settings, get_db, load_config))
 
     async def get_experiment(
         experiment: str | None = Query(None, max_length=63), config: Configuration = Depends(get_config)

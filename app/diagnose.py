@@ -228,17 +228,23 @@ async def engine_section(db: Database, slugs: list[str], since: datetime) -> lis
     return lines
 
 
+async def diagnosis(db: Database, settings: Settings, days: int) -> str:
+    """The whole report as text (also served by the read-only data API)."""
+    config = await load_configuration(db, settings)
+    experiments = config.experiments or single_experiment(config.settings).experiments
+    since = utcnow() - timedelta(days=days)
+    parts = [f"Tradlysis diagnosis · last {days} day(s) · {utcnow():%Y-%m-%d %H:%M} UTC", ""]
+    parts += await engine_section(db, [e.slug for e in experiments], since)
+    for e in experiments:
+        parts.append("")
+        parts += report(await build_funnel(db, e.slug, since), e)
+    return "\n".join(parts)
+
+
 async def run(settings: Settings, days: int) -> int:
     db = Database(settings)
     try:
-        config = await load_configuration(db, settings)
-        experiments = config.experiments or single_experiment(config.settings).experiments
-        since = utcnow() - timedelta(days=days)
-        print(f"Tradlysis diagnosis · last {days} day(s) · {utcnow():%Y-%m-%d %H:%M} UTC\n")
-        print("\n".join(await engine_section(db, [e.slug for e in experiments], since)))
-        for e in experiments:
-            print()
-            print("\n".join(report(await build_funnel(db, e.slug, since), e)))
+        print(await diagnosis(db, settings, days))
     finally:
         await db.dispose()
     return 0

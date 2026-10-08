@@ -168,6 +168,8 @@ class Settings(BaseSettings):
     dashboard_password: str = ""
     # Second password for the config page (credentials, risk limits); the page stays locked until set.
     config_password: str = ""
+    # Bearer token for the read-only data API (/api/data/*); empty = the API is off.
+    data_api_token: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
@@ -205,6 +207,8 @@ class Settings(BaseSettings):
             raise ValueError("MAX_OPEN_TRADES must be >= 1")
         if not 0.0 <= self.min_decision_confidence <= 1.0:
             raise ValueError("MIN_DECISION_CONFIDENCE must be between 0 and 1")
+        if self.data_api_token and len(self.data_api_token) < 24:
+            raise ValueError("DATA_API_TOKEN must be at least 24 characters (or empty to switch the data API off)")
         if self.min_stop_pips <= 0 or self.max_stop_pips <= self.min_stop_pips:
             raise ValueError("Require 0 < MIN_STOP_PIPS < MAX_STOP_PIPS")
         if not 5 <= self.breakout_range_bars <= 28:
