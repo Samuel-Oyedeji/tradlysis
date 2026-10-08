@@ -332,6 +332,9 @@ def test_out_of_sample_periods_and_selection():
     sel = bt.selection([summary("a", 5, 4), summary("b", 2, 3)])
     assert sel[0]["outcome"] == "holds" and sel[0]["check_rank"] == 1
     assert bt.selection([summary("a", 5, 1), summary("b", 2, 3)])[0]["outcome"] == "mixed"
+    # nothing profitable on the tuning period: no choice to judge, whatever the check period shows
+    none = bt.selection([summary("a", -0.5, 9), summary("b", -2, 1)])[0]
+    assert none["outcome"] == "none" and not none["holds"]
 
 
 async def test_candles_endpoint_feeds_an_offline_backtest(db, monkeypatch, tmp_path):

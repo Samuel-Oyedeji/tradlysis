@@ -384,10 +384,13 @@ def selection(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "check_trades": best["check"]["trades"],
             "check_rank": by_check.index(best) + 1,
             "variants": len(group),
-            "holds": best["check"]["total_r"] > 0 and by_check.index(best) < (len(group) + 1) // 2,
-            # holds: still profitable and among the better half; mixed: profitable but others did better;
-            # fails: lost money on the period it was not chosen on
-            "outcome": "fails" if best["check"]["total_r"] <= 0
+            "holds": best["tuning"]["total_r"] > 0 and best["check"]["total_r"] > 0
+            and by_check.index(best) < (len(group) + 1) // 2,
+            # none: no variant made money on the tuning period, so there was nothing worth choosing;
+            # holds: still profitable on the check period and among the better half there; mixed:
+            # profitable but others did better; fails: lost money on the period it was not chosen on
+            "outcome": "none" if best["tuning"]["total_r"] <= 0
+            else "fails" if best["check"]["total_r"] <= 0
             else "holds" if by_check.index(best) < (len(group) + 1) // 2 else "mixed",
         })
     return out
@@ -482,7 +485,8 @@ def render(result: dict[str, Any], *, trades: bool = False) -> str:
             lines.append(
                 f"  → best on the tuning period: {sel['label']} ({sel['tuning_r']:+.1f}R); on the check period "
                 f"{sel['check_r']:+.1f}R over {sel['check_trades']} trades, #{sel['check_rank']} of {sel['variants']}: "
-                + {"holds": "holds up",
+                + {"none": "no variant made money on the tuning period, so none can be chosen",
+                   "holds": "holds up",
                    "mixed": "still profitable, but another variant did better there (the choice is likely luck)",
                    "fails": "does NOT hold up (likely luck)"}[sel.get("outcome", "holds" if sel["holds"] else "fails")]
             )

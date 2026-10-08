@@ -342,7 +342,8 @@ function runCard(r, cur, split) {
 }
 
 function selectionNote(sel) {
-  const said = {holds: ["good", "it holds up."], mixed: ["warn", "it stayed profitable, but another variant did better there, so the choice between them is likely luck."],
+  const said = {none: ["bad", "but no variant made money on the tuning period, so there is nothing worth choosing (any check-period gain is luck)."],
+    holds: ["good", "it holds up."], mixed: ["warn", "it stayed profitable, but another variant did better there, so the choice between them is likely luck."],
     fails: ["bad", "it does <b>not</b> hold up, so the difference is likely luck."]};
   return (sel || []).map(x => { const [tone, words] = said[x.outcome || (x.holds ? "holds" : "fails")];
     return `<div class="reading ${tone}" style="margin:12px 16px 0">
