@@ -68,6 +68,7 @@ from app.strategy.base import StrategyResult
 from app.strategy.range_breakout import evaluate_range_breakout
 from app.strategy.registry import STRATEGIES
 from app.strategy.session_breakout import evaluate_session_breakout
+from app.strategy.structure_poi import evaluate_structure_poi
 from app.strategy.trend_following import evaluate_trend_following
 from app.strategy.trend_pullback import evaluate_trend_pullback
 from app.technicals.engine import TechnicalState, compute_technical_state, persist_technical_state
@@ -840,6 +841,8 @@ def evaluate_strategy(name: str, tech: TechnicalState, bid: float, ask: float, s
         return evaluate_trend_following(tech, bid, ask, settings)
     if name == "london_breakout":
         return evaluate_session_breakout(tech, bid, ask, settings)
+    if name == "structure_poi":
+        return evaluate_structure_poi(tech, bid, ask, settings)
     raise ValueError(f"unknown strategy {name!r}")
 
 
