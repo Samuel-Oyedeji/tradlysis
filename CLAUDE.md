@@ -37,5 +37,6 @@
   With a model (`--model` / `model=true`) it asks the decision model about each rules-only trade via `build_snapshot`
   (`evaluate_model`), so the model's value is measured, not assumed.
 - Bump a strategy's prompt version in `app/decision/prompts.py` (`PROMPT_VERSION` for trend pullback,
-  `BREAKOUT_PROMPT_VERSION`, `TREND_PROMPT_VERSION`, `LONDON_PROMPT_VERSION`) whenever its prompt or questions change
+  `BREAKOUT_PROMPT_VERSION`, `TREND_PROMPT_VERSION`, `LONDON_PROMPT_VERSION`,
+  `STRUCTURE_POI_PROMPT_VERSION`) whenever its prompt or questions change
   (`NEWS_PROMPT_VERSION` in `app/news/interpreter.py` for the news questions).

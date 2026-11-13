@@ -5,7 +5,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.decision.prompts import LONDON_BREAKOUT, RANGE_BREAKOUT, TREND_FOLLOWING, TREND_PULLBACK, DecisionPrompt
+from app.decision.prompts import (
+    LONDON_BREAKOUT,
+    RANGE_BREAKOUT,
+    STRUCTURE_POI,
+    TREND_FOLLOWING,
+    TREND_PULLBACK,
+    DecisionPrompt,
+)
 from app.technicals.regime import MarketRegimeLabel as R
 
 
@@ -34,6 +41,10 @@ STRATEGIES: dict[str, StrategySpec] = {
     "london_breakout": StrategySpec(
         "london_breakout", "London breakout", "LONDON_BREAKOUT", LONDON_BREAKOUT,
         frozenset({R.BREAKOUT_UP, R.BREAKOUT_DOWN, R.COMPRESSION, R.RANGE}),
+    ),
+    "structure_poi": StrategySpec(
+        "structure_poi", "Structure, liquidity & POI", "STRUCTURE_POI", STRUCTURE_POI,
+        frozenset({R.STRONG_UPTREND, R.STRONG_DOWNTREND, R.BREAKOUT_UP, R.BREAKOUT_DOWN, R.RANGE}),
     ),
 }
 SPEC_BY_SETUP = {spec.setup: spec for spec in STRATEGIES.values()}

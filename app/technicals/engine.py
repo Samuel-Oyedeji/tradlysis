@@ -56,6 +56,8 @@ class TimeframeState:
     swings: list[Swing] = field(default_factory=list)
     atr_series: list[float | None] = field(default_factory=list)
     recent_bars: list[Bar] = field(default_factory=list)
+    # Every candle the state was computed from (``recent_bars`` is the last 30); empty when not supplied.
+    bars: list[Bar] = field(default_factory=list, repr=False)
 
     @property
     def last_swing_high(self) -> float | None:
@@ -135,6 +137,7 @@ def compute_timeframe_state(timeframe: str, bars: Sequence[Bar]) -> TimeframeSta
         swings=swings,
         atr_series=a,
         recent_bars=list(bars[-30:]),
+        bars=list(bars),
     )
 
 

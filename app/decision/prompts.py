@@ -368,3 +368,49 @@ LONDON_BREAKOUT = _confirmation_prompt(
         "news_risk_high": DECISION_CHECKS["news_risk_high"],
     },
 )
+
+
+# =========================================================================== structure, liquidity & POI
+
+STRUCTURE_POI_PROMPT_VERSION = "structure-poi-v1"
+
+STRUCTURE_POI = _confirmation_prompt(
+    "STRUCTURE_POI", STRUCTURE_POI_PROMPT_VERSION,
+    """The STRUCTURE_POI setup (long; short is the mirror image), read on the structure timeframe in \
+setup_check.context ("structure_timeframe"):
+1. Sweep: a swing low (the protected level) traded below the swing low before it, taking the stops there.
+2. Main break of structure: price then closed above the last swing high before that low (the previous \
+lower high), turning the structure bullish.
+3. The protected low has held since.
+4. Structural liquidity: a smaller swing low inside the up-move, at or below about the 50% level of the swing.
+5. Point of interest (POI): the last bearish candle at the origin of the move, just below that liquidity \
+and in the discount half of the swing.
+6. Entry: the latest 15m candle returned to the POI for the first time and closed back above its low.
+7. Stop beyond the protected low; target the swing high (or a fixed multiple of the risk).
+8. The 4h trend is not against the trade, and no high-impact news event is imminent.""",
+    "trends and breakouts usually suit this setup; event risk and unclear markets usually do not",
+    "entry, a stop beyond the protected level, take-profit at the swing extreme or a multiple of the risk",
+    "Confirm a long STRUCTURE_POI: setup_check.trade_plan.direction is BUY and the snapshot clearly shows "
+    "the sweep, the break of structure, an intact protected low and price reacting at the POI.",
+    "Confirm a short STRUCTURE_POI: setup_check.trade_plan.direction is SELL and the snapshot clearly shows "
+    "the sweep, the break of structure, an intact protected high and price reacting at the POI.",
+    "No complete setup, no trade plan or a plan in the other direction, a structure that looks broken or "
+    "unclear, price slicing through the POI, high news risk, or any doubt. WAIT is always acceptable.",
+    {
+        "structure_intact": (
+            "Does the snapshot show a clear swing structure in the direction of setup_check.trade_plan (a sweep, "
+            "a break of the previous swing, and the protected level still holding)?",
+            ("STRUCTURE_INTACT", "STRUCTURE_INTACT", None),
+            "STRUCTURE_BROKEN",
+        ),
+        "poi_reaction": (
+            "Has price returned to the point of interest and started to react from it in the direction of the "
+            "plan (support for longs, resistance for shorts)?",
+            ("PULLBACK_TO_SUPPORT", "PULLBACK_TO_RESISTANCE", None),
+            "NO_PULLBACK",
+        ),
+        "htf_trend_supports": DECISION_CHECKS["htf_trend_supports"],
+        "room_to_target": DECISION_CHECKS["room_to_target"],
+        "news_risk_high": DECISION_CHECKS["news_risk_high"],
+    },
+)
