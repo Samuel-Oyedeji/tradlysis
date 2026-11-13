@@ -332,7 +332,7 @@ async function renderDetail(id) {
       ${fact(it.category === "TRADED" ? "Result" : "Would have", resultValue)}
     </div>
     <section class="panel" style="margin-bottom:16px">
-      <div class="panel-h"><h2>Price · 15-minute closes</h2><button class="linkbtn" id="tbl" type="button">Show table</button></div>
+      <div class="panel-h"><h2>Price · 15-minute bars <span class="aside" style="font-weight:400">· line: close, bars: high–low</span></h2><button class="linkbtn" id="tbl" type="button">Show table</button></div>
       <div class="panel-b"><div class="chart-wrap" id="cw"><svg class="chart" id="pchart" role="img" aria-label="Price path with entry, stop-loss and take-profit levels"></svg><div class="tooltip" id="tip"></div></div><div class="scroll-x" id="ctable" style="display:none"></div></div>
     </section>
     <section class="panel">
@@ -375,6 +375,19 @@ function drawChart(d) {
     const anchor = x > W - P.r - 70 ? "end" : "start";
     g += `<line x1="${x}" x2="${x}" y1="${P.t}" y2="${H - P.b}" stroke="var(--ink-3)" stroke-dasharray="2 3"/><text x="${anchor === "end" ? x - 4 : x + 4}" y="${P.t - 5}" text-anchor="${anchor}" font-size="11" fill="var(--ink-3)">${esc(label)}</text>`;
   }
+  // High-low wick per bar, behind the close line. Between the decision (or fill) and the bar that settled the
+  // outcome, a wick that reaches the stop or target is coloured, so a stop run inside a bar shows even when no
+  // close crossed the level.
+  const long = L.stop_loss != null && L.take_profit != null ? L.take_profit > L.stop_loss : null;
+  const from = M.decision || M.open ? new Date(M.decision || M.open).getTime() : Infinity;
+  const end = M.close || M.hypothetical_resolved, until = end ? new Date(end).getTime() : Infinity;
+  const ww = Math.max(1, Math.min(4, (W - P.l - P.r) / pts.length * 0.45));
+  g += pts.map((p, i) => {
+    const live = long != null && xs[i] >= from && xs[i] <= until;
+    const sl = live && (long ? p.l <= L.stop_loss : p.h >= L.stop_loss), tp = live && (long ? p.h >= L.take_profit : p.l <= L.take_profit);
+    const color = sl ? "var(--bad)" : tp ? "var(--good)" : "var(--ink-3)";
+    return `<line x1="${X(xs[i]).toFixed(1)}" x2="${X(xs[i]).toFixed(1)}" y1="${Y(p.h).toFixed(1)}" y2="${Y(p.l).toFixed(1)}" stroke="${color}" stroke-width="${ww.toFixed(1)}" stroke-opacity="${sl || tp ? 0.9 : 0.45}" stroke-linecap="round"/>`;
+  }).join("");
   g += `<path d="${pts.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(p.c).toFixed(1)}`).join("")}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
   g += `<text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--ink-3)">${esc(dt(pts[0].t))}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--ink-3)">${esc(dt(pts[pts.length - 1].t))}</text>`;
   g += `<line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--ink-3)" style="display:none"/><circle id="xd" r="4" fill="var(--accent)" stroke="var(--panel)" stroke-width="2" style="display:none"/><rect id="hit" x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent"/>`;
