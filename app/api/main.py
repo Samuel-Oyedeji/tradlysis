@@ -17,7 +17,6 @@ import logging
 import secrets
 import time
 from bisect import bisect_left
-from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -249,44 +248,65 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         filter: str = Query("all", pattern="^(all|traded|stopped)$"),
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
+        experiment: str | None = Query(None, max_length=63),
         _: str = Depends(require_auth),
-        exp: ExperimentConfig = Depends(get_experiment),
+        config: Configuration = Depends(get_config),
         database: Database = Depends(get_db),
     ) -> dict[str, Any]:
+        """Trades and stopped setups of one experiment, or of every experiment (``experiment=all``).
+
+        ``experiments`` (each experiment) and ``overall`` (everything, including trades no experiment
+        owns) feed the page's experiment cards; ``summary`` and ``items`` are for the selection only.
+        """
+        selected: str | None = None  # None: every experiment
+        if experiment != "all":
+            exp = config.get(experiment or config.default_slug() or "")
+            if exp is None:
+                raise HTTPException(404, f"unknown experiment {experiment!r}")
+            selected = exp.slug
         async with database.session() as s:
-            chains = await history.load_chains(s, exp.slug)
-            decided = [c.request.candle_time + history.DECISION_BAR for c in chains if c.request is not None]
-            bars = (
-                await history.load_bars(s, exp.instrument, min(decided), max(decided) + history.HYPOTHETICAL_HORIZON)
-                if decided
-                else []
-            )
-        bar_times = [b.time for b in bars]
+            chains = await history.load_chains(s, [e.slug for e in config.experiments])
+            decided: dict[str, list[datetime]] = {}
+            for c in chains:
+                if c.request is not None and c.trade is None and c.request.trade_plan:
+                    decided.setdefault(c.request.instrument, []).append(c.request.candle_time + history.DECISION_BAR)
+            bars = {
+                inst: await history.load_bars(s, inst, min(times), max(times) + history.HYPOTHETICAL_HORIZON)
+                for inst, times in decided.items()
+            }
+        bar_times = {inst: [b.time for b in bs] for inst, bs in bars.items()}
         items = []
         for c in chains:
             hypo = None
             if c.request is not None and c.trade is None and c.request.trade_plan:
-                start = c.request.candle_time + history.DECISION_BAR
-                hypo = history.hypothetical_outcome(c.request.trade_plan, start, bars[bisect_left(bar_times, start):])
+                inst, start = c.request.instrument, c.request.candle_time + history.DECISION_BAR
+                hypo = history.hypothetical_outcome(
+                    c.request.trade_plan, start, bars[inst][bisect_left(bar_times[inst], start):]
+                )
             items.append(history.item_summary(c, hypo))
         items.sort(key=lambda i: i["time"] or "", reverse=True)
 
-        stopped = [i for i in items if i["category"] == "STOPPED"]
-        summary = {
-            "taken": sum(1 for i in items if i["category"] == "TRADED"),
-            "won": sum(1 for i in items if i["outcome"] == "WON"),
-            "lost": sum(1 for i in items if i["outcome"] == "LOST"),
-            "open": sum(1 for i in items if i["outcome"] == "OPEN"),
-            "stopped": len(stopped),
-            "stopped_would_win": sum(1 for i in stopped if (i["hypothetical"] or {}).get("result") == "WOULD_WIN"),
-            "stopped_would_lose": sum(1 for i in stopped if (i["hypothetical"] or {}).get("result") == "WOULD_LOSE"),
-            "stopped_by": dict(Counter(i["outcome"] for i in stopped)),
-        }
+        experiments = [
+            {**{k: v for k, v in e.summary().items() if k in ("slug", "name", "instrument", "strategy", "enabled")},
+             "color": n, "summary": history.summarize([i for i in items if i["experiment"] == e.slug])}
+            for n, e in enumerate(config.experiments)
+        ]
+        overall = history.summarize(items)
+        if selected is not None:
+            items = [i for i in items if i["experiment"] == selected]
+        summary = overall if selected is None else history.summarize(items)
         if filter == "traded":
             items = [i for i in items if i["category"] == "TRADED"]
         elif filter == "stopped":
-            items = stopped
-        return {"summary": summary, "total": len(items), "items": items[offset : offset + limit]}
+            items = [i for i in items if i["category"] == "STOPPED"]
+        return {
+            "experiment": selected or "all",
+            "experiments": experiments,
+            "overall": overall,
+            "summary": summary,
+            "total": len(items),
+            "items": items[offset : offset + limit],
+        }
 
     @app.get("/api/history/{item_id}")
     async def get_history_item(

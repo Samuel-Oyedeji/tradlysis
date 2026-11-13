@@ -52,8 +52,8 @@
   };
   const PAGES = [["overview", "/", "Overview"], ["history", "/history", "History"], ["analysis", "/analysis", "Analysis"],
     ["experiments", "/experiments", "Experiments"], ["backtest", "/backtest", "Backtest"], ["config", "/config", "Config"]];
-  // Pages about one experiment show the picker; the account-wide ones don't.
-  const PER_EXPERIMENT = new Set(["overview", "history", "analysis"]);
+  // Pages about one experiment show the picker; the account-wide ones don't (History has its own).
+  const PER_EXPERIMENT = new Set(["overview", "analysis"]);
   const pair = (inst) => String(inst || "").replace("_", "/");
 
   function statusRows(s) {
@@ -130,7 +130,10 @@
     return lastStatus;
   }
 
-  window.T = {esc, fmt, dt, tm, day, short, pretty, signed, codes, api, pair, renderShell, refreshStatus, selectExperiment,
+  // Remember an experiment for the other pages without reloading this one.
+  const rememberExperiment = (slug) => { store.set(slug); experiment = slug; };
+
+  window.T = {esc, fmt, dt, tm, day, short, pretty, signed, codes, api, pair, renderShell, refreshStatus, selectExperiment, rememberExperiment,
     onStatus: (fn) => { listeners.push(fn); if (lastStatus) fn(lastStatus); }, get status() { return lastStatus; },
     get experiment() { return experiment; }};
 })();

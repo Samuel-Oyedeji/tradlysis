@@ -11,6 +11,7 @@ Everything here is read-only. The pure functions (``classify``, ``hypothetical_o
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -370,20 +371,36 @@ def _fmt_duration(d: timedelta) -> str:
 # --------------------------------------------------------------------------- loading
 
 
-def _qualifying(experiment: str):
+def _qualifying(experiments: Sequence[str]):
     return select(DecisionRequest).where(
-        DecisionRequest.experiment == experiment,
+        DecisionRequest.experiment.in_(list(experiments)),
         or_(DecisionRequest.llm_called.is_(True), DecisionRequest.strategy_result["candidate"].as_boolean().is_(True)),
     )
 
 
-async def load_chains(session: AsyncSession, experiment: str, limit: int = 2000) -> list[Chain]:
-    reqs = (await session.scalars(_qualifying(experiment).order_by(DecisionRequest.candle_time.desc()).limit(limit))).all()
+async def load_chains(session: AsyncSession, experiments: Sequence[str], limit: int = 2000) -> list[Chain]:
+    """Opportunities of the given experiments (up to ``limit`` each, newest first), plus broker
+    trades with no decision behind them (e.g. opened manually on the account)."""
+    if not experiments:
+        return []
+    reqs = (await session.scalars(
+        _qualifying(experiments).order_by(DecisionRequest.candle_time.desc()).limit(limit * len(experiments))
+    )).all()
     chains = await _attach(session, list(reqs))
-    # Broker trades not linked to any decision (e.g. opened manually on the account).
-    orphans = (await session.scalars(select(Trade).where(Trade.order_id.is_(None)).order_by(Trade.open_time.desc()))).all()
+    orphans = (await session.scalars(
+        select(Trade)
+        .where(Trade.order_id.is_(None), or_(Trade.experiment.is_(None), Trade.experiment.in_(list(experiments))))
+        .order_by(Trade.open_time.desc())
+    )).all()
     chains += [Chain(trade=t) for t in orphans]
     return chains
+
+
+def chain_experiment(chain: Chain) -> str | None:
+    """The experiment an opportunity belongs to (None: a broker trade no experiment owns)."""
+    if chain.request is not None:
+        return chain.request.experiment
+    return chain.trade.experiment if chain.trade is not None else None
 
 
 async def load_chain(session: AsyncSession, item_id: str) -> Chain | None:
@@ -458,6 +475,7 @@ def item_summary(chain: Chain, hypothetical: dict[str, Any] | None) -> dict[str,
     time = (req.candle_time + DECISION_BAR) if req else (t.open_time if t else None)
     return {
         "id": item_id(chain),
+        "experiment": chain_experiment(chain),
         "time": time.isoformat() if time else None,
         "direction": direction,
         "instrument": (req.instrument if req else None) or (t.instrument if t else None),
@@ -475,4 +493,35 @@ def item_summary(chain: Chain, hypothetical: dict[str, Any] | None) -> dict[str,
         "regime": (snap.get("market_regime") or {}).get("label"),
         "news_risk": (snap.get("news") or {}).get("risk"),
         "hypothetical": hypothetical,
+    }
+
+
+CURVE_POINTS = 40
+
+
+def summarize(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Counts for a list of ``item_summary`` dicts, plus the net R of closed trades and its
+    running total (oldest first, the last ``CURVE_POINTS`` trades) for a small chart."""
+    stopped = [i for i in items if i["category"] == "STOPPED"]
+    closed = sorted(
+        (i for i in items if i["category"] == "TRADED" and i["outcome"] in ("WON", "LOST", "BREAKEVEN")
+         and i["r_multiple"] is not None),
+        key=lambda i: i["time"] or "",
+    )
+    curve, total = [0.0], 0.0
+    for i in closed:
+        total += float(i["r_multiple"])
+        curve.append(round(total, 2))
+    return {
+        "taken": sum(1 for i in items if i["category"] == "TRADED"),
+        "won": sum(1 for i in items if i["outcome"] == "WON"),
+        "lost": sum(1 for i in items if i["outcome"] == "LOST"),
+        "open": sum(1 for i in items if i["outcome"] == "OPEN"),
+        "stopped": len(stopped),
+        "stopped_would_win": sum(1 for i in stopped if (i["hypothetical"] or {}).get("result") == "WOULD_WIN"),
+        "stopped_would_lose": sum(1 for i in stopped if (i["hypothetical"] or {}).get("result") == "WOULD_LOSE"),
+        "stopped_by": dict(Counter(i["outcome"] for i in stopped)),
+        "closed": len(closed),
+        "net_r": round(total, 2) if closed else None,
+        "curve": curve[-(CURVE_POINTS + 1):] if closed else [],
     }

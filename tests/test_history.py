@@ -188,19 +188,63 @@ async def seed(db):
 
 async def test_history_list_and_filters(db, client):
     r1, r2 = await seed(db)
-    data = (await client.get("/api/history")).json()
+    exp = make_settings().experiment_name
+    data = (await client.get("/api/history")).json()  # default: the default experiment
+    assert data["experiment"] == exp
     ids = [i["id"] for i in data["items"]]
-    assert f"r-{r1}" in ids and f"r-{r2}" in ids and len(ids) == 3  # no-setup interval excluded; external trade included
+    assert ids == [f"r-{r2}", f"r-{r1}"]  # no-setup interval and the trade no experiment owns excluded
+    assert {i["experiment"] for i in data["items"]} == {exp}
     s = data["summary"]
-    assert s["taken"] == 2 and s["won"] == 1 and s["stopped"] == 1 and s["stopped_would_win"] == 1
+    assert s["taken"] == 1 and s["won"] == 1 and s["stopped"] == 1 and s["stopped_would_win"] == 1
+    assert s["net_r"] == 2.5 and s["curve"] == [0.0, 2.5]
     stopped = next(i for i in data["items"] if i["id"] == f"r-{r1}")
     assert stopped["outcome"] == "STOPPED_BY_RISK" and stopped["hypothetical"]["result"] == "WOULD_WIN"
-    ext = next(i for i in data["items"] if i["id"].startswith("t-"))
-    assert ext["outcome"] == "EXTERNAL"
-    traded = (await client.get("/api/history?filter=traded")).json()["items"]
+    [card] = data["experiments"]
+    assert card["slug"] == exp and card["color"] == 0 and card["summary"]["taken"] == 1
+
+    everything = (await client.get("/api/history?experiment=all")).json()
+    assert everything["experiment"] == "all" and len(everything["items"]) == 3
+    ext = next(i for i in everything["items"] if i["id"].startswith("t-"))
+    assert ext["outcome"] == "EXTERNAL" and ext["experiment"] is None
+    assert everything["summary"]["taken"] == 2 == everything["overall"]["taken"]
+    assert data["overall"]["taken"] == 2, "the All card counts everything whatever is selected"
+
+    traded = (await client.get("/api/history?experiment=all&filter=traded")).json()["items"]
     assert {i["id"] for i in traded} == {f"r-{r2}", ext["id"]}
     only_stopped = (await client.get("/api/history?filter=stopped")).json()["items"]
     assert [i["id"] for i in only_stopped] == [f"r-{r1}"]
+    assert (await client.get("/api/history?experiment=nope")).status_code == 404
+
+
+async def test_history_per_experiment(db, client):
+    from app.config import store
+    from app.config.store import ExperimentInput
+
+    base = make_settings(database_url=db.engine.url.render_as_string(hide_password=False))
+    for slug, inst in (("eur-a", "EUR_USD"), ("gbp-b", "GBP_USD")):
+        await store.save_experiment(db, base, slug, ExperimentInput(name=slug.upper(), instrument=inst, enabled=True,
+                                                                    capital="1000"), "t", create=True)
+    async with db.session() as s:
+        for n, (slug, inst) in enumerate((("eur-a", "EUR_USD"), ("gbp-b", "GBP_USD"), ("gbp-b", "GBP_USD"))):
+            s.add(DecisionRequest(experiment=slug, instrument=inst, candle_time=T0 + timedelta(hours=n), snapshot=SNAPSHOT,
+                                  strategy_result=STRATEGY, llm_called=True))
+        s.add(DecisionRequest(experiment="gone", instrument="EUR_USD", candle_time=T0, snapshot=SNAPSHOT,
+                              strategy_result=STRATEGY, llm_called=True))  # an experiment no longer configured
+        s.add(Trade(broker_trade_id="e1", experiment="eur-a", instrument="EUR_USD", direction="BUY", initial_units=1,
+                    current_units=0, open_price=1.1, open_time=T0, state="CLOSED", close_time=T0 + timedelta(hours=1),
+                    realized_pl=Decimal("-10"), r_multiple=-1.0))  # no decision behind it, but owned by eur-a
+
+    gbp = (await client.get("/api/history?experiment=gbp-b")).json()
+    assert len(gbp["items"]) == 2 and {i["experiment"] for i in gbp["items"]} == {"gbp-b"}
+    eur = (await client.get("/api/history?experiment=eur-a")).json()
+    assert {i["experiment"] for i in eur["items"]} == {"eur-a"} and len(eur["items"]) == 2
+    assert eur["summary"]["net_r"] == -1.0 and gbp["summary"]["net_r"] is None
+    everything = (await client.get("/api/history?experiment=all&limit=2")).json()
+    assert everything["total"] == 4 and len(everything["items"]) == 2
+    cards = {e["slug"]: e for e in everything["experiments"]}
+    assert [e["slug"] for e in everything["experiments"]] == ["eur-a", "gbp-b"]
+    assert cards["eur-a"]["color"] == 0 and cards["gbp-b"]["color"] == 1
+    assert cards["eur-a"]["summary"]["taken"] == 1 and cards["eur-a"]["instrument"] == "EUR_USD"
 
 
 async def test_history_item_timeline(db, client):
@@ -223,6 +267,17 @@ async def test_history_page_served(client):
         r = await client.get(path)
         assert r.status_code == 200 and "<title>Trade History</title>" in r.text
     assert (await client.get("/api/history", auth=("admin", "nope"))).status_code == 401
+
+
+def test_summarize_counts_and_running_r():
+    def it(t, outcome, r=None, category="TRADED"):
+        return {"time": (T0 + timedelta(hours=t)).isoformat(), "category": category, "outcome": outcome, "r_multiple": r,
+                "hypothetical": None}
+    s = history.summarize([it(3, "LOST", -1.0), it(1, "WON", 2.0), it(2, "OPEN"), it(4, "STOPPED_BY_RISK", category="STOPPED")])
+    assert (s["taken"], s["won"], s["lost"], s["open"], s["stopped"]) == (3, 1, 1, 1, 1)
+    assert s["closed"] == 2 and s["net_r"] == 1.0 and s["curve"] == [0.0, 2.0, 1.0]  # oldest first
+    empty = history.summarize([it(1, "OPEN")])
+    assert empty["net_r"] is None and empty["curve"] == []
 
 
 def test_item_summary_direction_for_orphan_trade():

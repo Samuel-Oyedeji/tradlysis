@@ -59,12 +59,36 @@ svg#pchart { height: 280px; }
 .children li::before { content: ""; position: absolute; left: -2px; top: 13px; width: 10px; border-top: 2px solid var(--grid); }
 .children .ci { font-weight: 700; margin-right: 4px; }
 .children .cd { color: var(--ink-3); overflow-wrap: break-word; }
+/* experiment cards: one row, scrolls sideways when there are more than fit */
+:root { --x0: #8b6cf0; --x1: #1fa5b3; --x2: #e67a2e; --x3: #d6498f; --x4: #4d7fff; --x5: #9aa31c; --x6: #c05d3c; --x7: #7d8aa5; }
+.xstrip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(176px, 1fr); gap: 10px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scroll-padding: 0 2px; margin: 0 0 16px; padding: 2px 2px 6px; scrollbar-width: thin; }
+.xstrip:empty { display: none; }
+.xcard { position: relative; display: block; text-align: left; font: inherit; color: inherit; cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 11px 13px 10px 16px; min-width: 0; overflow: hidden; scroll-snap-align: start; box-shadow: var(--shadow); }
+.xcard::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--c, var(--ink-3)); }
+.xcard.all::before { background: linear-gradient(var(--x0) 0 20%, var(--x1) 20% 40%, var(--x2) 40% 60%, var(--x3) 60% 80%, var(--x4) 80%); }
+.xcard:hover { background: var(--panel-2); }
+.xcard[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.xcard > span { display: block; }
+.xcard .xn { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-weight: 700; font-size: 13.5px; white-space: nowrap; }
+.xcard .xn > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.xcard .off { font: 600 10px var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
+.xcard .xs { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.xcard .xrow { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.xcard .xr { display: block; font: 600 17px/1 var(--mono); }
+.xcard .xm { display: block; font-size: 12px; font-weight: 500; color: var(--ink-2); margin-top: 6px; white-space: nowrap; }
+.xcard svg { width: 56px; height: 24px; flex: none; }
+.xtag { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
+.xtag i { width: 8px; height: 8px; border-radius: 2px; background: var(--c, var(--ink-3)); flex: none; }
+.item .meta .xtag { margin-right: 6px; }
+.item.x:not([aria-current="true"]) { box-shadow: inset 3px 0 0 var(--c, var(--ink-3)); }
+.dh .xtag { font-size: 13px; margin-top: 6px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; }
 .kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--ink-2); }
 @media (max-width: 1280px) { .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } .facts > div:nth-child(4) { border-left: 0; } .facts > div:nth-child(n+4) { border-top: 1px solid var(--grid); } .nbody { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 899px) {
   .split { grid-template-columns: minmax(0, 1fr); }
   .listpane { position: static; max-height: none; }
-  body.detail .listpane, body.detail .stats { display: none; }
+  body.detail .listpane, body.detail .stats, body.detail .xstrip { display: none; }
+  .xstrip { grid-auto-columns: 172px; margin-right: -16px; padding-right: 16px; }
   body:not(.detail) .detailpane { display: none; }
   svg#pchart { height: 220px; }
   .dh .res { text-align: left; }
@@ -78,7 +102,8 @@ svg#pchart { height: 280px; }
   <div>
     <header class="topbar" id="topbar"></header>
     <main class="main">
-      <div class="page-h"><h1>History</h1><span class="muted keys">Use <span class="kbd">↑</span> <span class="kbd">↓</span> to move between items</span></div>
+      <div class="page-h"><h1>History</h1><span class="muted keys">Use <span class="kbd">↑</span> <span class="kbd">↓</span> for items, <span class="kbd">[</span> <span class="kbd">]</span> for experiments</span></div>
+      <div class="xstrip" id="xstrip" role="group" aria-label="Experiment"></div>
       <div class="stats" id="stats"></div>
       <div class="split">
         <section class="panel listpane" aria-label="Trades and stopped setups">
@@ -103,8 +128,49 @@ const $ = (id) => document.getElementById(id);
 const isDesktop = () => window.matchMedia("(min-width: 900px)").matches;
 T.renderShell("history"); T.refreshStatus(); setInterval(T.refreshStatus, 30000);
 
-let state = {filter: "all", offset: 0, items: [], total: 0, selected: null};
+// ?show=<slug> shows one experiment; without it, every experiment in one list. (Not ?experiment=,
+// which app.js treats as the account-wide pick and would reject "all".)
+const urlShow = () => new URLSearchParams(location.search).get("show") || "all";
+let state = {filter: "all", offset: 0, items: [], total: 0, selected: null, show: urlShow(), experiments: [], overall: null};
 const pathId = () => { const m = location.pathname.match(/^\/history\/([^/]+)$/); return m ? decodeURIComponent(m[1]) : null; };
+const qs = () => state.show === "all" ? "" : `?show=${encodeURIComponent(state.show)}`;
+
+// Experiments: colour (by position in the config) + name, always shown together.
+const expOf = (slug) => state.experiments.find(e => e.slug === slug);
+const xcolor = (slug) => { const e = expOf(slug); return e ? `var(--x${e.color % 8})` : "var(--ink-3)"; };
+const xtag = (slug, extra = "") => `<span class="xtag" style="--c:${xcolor(slug)}"><i></i>${esc(expOf(slug)?.name || slug || "No experiment")}${extra}</span>`;
+const rText = (r, d = 1) => r == null ? `<span class="muted">–</span>` : `<span class="${r >= 0 ? "good" : "bad"}">${r > 0 ? "+" : ""}${fmt(r, d)}R</span>`;
+function spark(curve) {
+  if (!curve || curve.length < 2) return "";
+  const W = 56, H = 24, lo = Math.min(...curve), hi = Math.max(...curve), y = v => 2 + (1 - (v - lo) / (hi - lo || 1)) * (H - 4);
+  const pts = curve.map((v, i) => `${(2 + i / (curve.length - 1) * (W - 4)).toFixed(1)},${y(v).toFixed(1)}`).join(" "), last = curve[curve.length - 1];
+  return `<svg viewBox="0 0 ${W} ${H}" aria-hidden="true"><line x1="2" x2="${W - 2}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)" stroke-dasharray="2 2"/><polyline points="${pts}" fill="none" stroke="var(--ink-2)" stroke-width="1.5" stroke-linejoin="round"/><circle cx="${W - 2}" cy="${y(last)}" r="2.5" fill="${last >= 0 ? "var(--good)" : "var(--bad)"}"/></svg>`;
+}
+function card(slug, name, sub, s, extra = "") {
+  const meta = s.taken ? `<span class="good">${s.won}W</span> · <span class="bad">${s.lost}L</span>${s.open ? ` · <span class="warn">${s.open} open</span>` : ""}` : "no trades yet";
+  const label = `${name}: ${s.net_r == null ? "no closed trades" : `${s.net_r > 0 ? "+" : ""}${fmt(s.net_r, 1)}R`}, ${s.won} won, ${s.lost} lost, ${s.open} open`;
+  return `<button type="button" class="xcard ${slug === "all" ? "all" : ""}" data-x="${esc(slug)}" aria-pressed="${state.show === slug}" aria-label="${esc(label)}" style="--c:${xcolor(slug)}">
+    <span class="xn"><span>${esc(name)}</span>${extra}</span><span class="xs">${esc(sub)}</span>
+    <span class="xrow"><span><span class="xr">${rText(s.net_r)}</span><span class="xm">${meta}</span></span>${spark(s.curve)}</span></button>`;
+}
+function renderStrip() {
+  const el = $("xstrip"), left = el.scrollLeft, exps = state.experiments;
+  el.innerHTML = card("all", "All experiments", `${exps.filter(e => e.enabled).length} on · ${exps.length} total`, state.overall)
+    + exps.map(e => card(e.slug, e.name, `${T.pair(e.instrument)} · ${pretty(e.strategy)}`, e.summary, e.enabled ? "" : `<span class="off">off</span>`)).join("");
+  el.scrollLeft = left;
+  el.querySelectorAll(".xcard").forEach(b => b.onclick = () => showExperiment(b.dataset.x));
+}
+async function showExperiment(slug, push = true) {
+  if (slug === state.show && push) return;
+  state.show = slug;
+  if (slug !== "all") T.rememberExperiment(slug);
+  if (push) history.pushState({}, "", `/history${qs()}`);
+  $("xstrip").querySelectorAll(".xcard").forEach(b => b.setAttribute("aria-pressed", b.dataset.x === slug));
+  $("xstrip").querySelector(`.xcard[aria-pressed="true"]`)?.scrollIntoView({block: "nearest", inline: "nearest"});
+  await loadList(true);
+  if (isDesktop() && state.items.length) select(state.items[0].id, false, true);
+  else select(null, false);
+}
 
 // Outcome -> [css class, icon]; icon + words so meaning never relies on colour alone.
 function tone(it) {
@@ -126,13 +192,18 @@ function hypoLine(h) {
 async function loadList(reset = true) {
   if (reset) { state.offset = 0; state.items = []; }
   let data;
-  try { data = await api(`/api/history?filter=${state.filter}&limit=50&offset=${state.offset}`); }
-  catch (e) { $("list").innerHTML = `<div class="empty bad">Couldn't load history: ${esc(e.message)}</div>`; return; }
+  try { data = await api(`/api/history?experiment=${encodeURIComponent(state.show)}&filter=${state.filter}&limit=50&offset=${state.offset}`); }
+  catch (e) {
+    if (e.status === 404 && state.show !== "all") return showExperiment("all");  // experiment deleted or renamed
+    $("list").innerHTML = `<div class="empty bad">Couldn't load history: ${esc(e.message)}</div>`; return;
+  }
   state.items = state.items.concat(data.items); state.total = data.total;
+  state.experiments = data.experiments; state.overall = data.overall;
+  renderStrip();
   const s = data.summary;
   const stat = (v, label) => `<div class="stat"><b>${v}</b><span>${label}</span></div>`;
   $("stats").innerHTML = stat(s.taken, "trades taken") + stat(`<span class="good">${s.won}</span> / <span class="bad">${s.lost}</span>`, "won / lost")
-    + stat(s.open, "open") + stat(s.stopped, "setups stopped")
+    + stat(s.open, "open") + stat(rText(s.net_r, 2), state.show === "all" ? "net R, all experiments" : "net R") + stat(s.stopped, "setups stopped")
     + stat(`<span class="good">▲ ${s.stopped_would_win}</span> <span class="bad">▼ ${s.stopped_would_lose}</span>`, "stopped setups: would have won / lost");
   $("count").textContent = `${state.total} item${state.total === 1 ? "" : "s"}`;
   renderList();
@@ -140,7 +211,8 @@ async function loadList(reset = true) {
 
 function renderList() {
   if (!state.items.length) {
-    const msg = {all: "No trades or setups yet. They appear here as soon as the engine finds a setup.", traded: "No trades taken yet.", stopped: "No stopped setups yet."}[state.filter];
+    const msg = {all: "No trades or setups yet. They appear here as soon as the engine finds a setup.", traded: "No trades taken yet.", stopped: "No stopped setups yet."}[state.filter]
+      .replace(/\.$/, state.show === "all" ? "." : ` for ${expOf(state.show)?.name || state.show}.`);
     $("list").innerHTML = `<div class="empty">${msg}</div>`; return;
   }
   let html = "", lastDay = null;
@@ -151,9 +223,10 @@ function renderList() {
     const detail = it.category === "TRADED"
       ? [it.r_multiple != null ? `${it.r_multiple > 0 ? "+" : ""}${fmt(it.r_multiple)}R` : null, it.pl != null ? `P/L ${fmt(it.pl)}` : null, it.confidence != null ? `confidence ${fmt(it.confidence)}` : null].filter(Boolean).join(" · ")
       : (it.reasons || []).map(pretty).join(", ");
-    html += `<a class="item" href="/history/${esc(it.id)}" data-id="${esc(it.id)}" ${it.id === state.selected ? 'aria-current="true"' : ""}>
+    const all = state.show === "all";
+    html += `<a class="item ${all ? "x" : ""}" style="--c:${xcolor(it.experiment)}" href="/history/${esc(it.id)}${qs()}" data-id="${esc(it.id)}" ${it.id === state.selected ? 'aria-current="true"' : ""}>
       <div class="r1"><span class="when">${esc(tm(it.time))} · ${esc(it.direction || "–")}</span><span class="badge ${cls}">${icon} ${esc(it.label)}</span></div>
-      ${detail ? `<div class="meta">${esc(detail)}</div>` : ""}
+      ${detail || all ? `<div class="meta">${all ? xtag(it.experiment) : ""}${esc(detail)}</div>` : ""}
       ${hypoLine(it.hypothetical)}</a>`;
   }
   if (state.items.length < state.total) html += `<div class="more"><button class="btn block" id="more" type="button">Load more (${state.total - state.items.length})</button></div>`;
@@ -171,9 +244,10 @@ function markActive() {
   if (cur && isDesktop()) cur.scrollIntoView({block: "nearest"});
 }
 
-async function select(id, push) {
+async function select(id, push, replace = false) {
   state.selected = id;
-  if (push) history.pushState({id}, "", id ? `/history/${id}` : "/history");
+  if (push) history.pushState({id}, "", `${id ? `/history/${id}` : "/history"}${qs()}`);
+  else if (replace) history.replaceState({id}, "", `${id ? `/history/${id}` : "/history"}${qs()}`);
   document.body.classList.toggle("detail", !!id);
   markActive();
   if (!id) { $("detail").innerHTML = `<div class="panel detail-empty">Select a trade or stopped setup to see its timeline.</div>`; return; }
@@ -182,11 +256,24 @@ async function select(id, push) {
   if (!isDesktop()) window.scrollTo(0, 0);
 }
 
-window.addEventListener("popstate", () => select(pathId(), false));
+window.addEventListener("popstate", async () => {
+  if (urlShow() !== state.show) {
+    state.show = urlShow(); await loadList(true);
+    $("xstrip").querySelector(`.xcard[aria-pressed="true"]`)?.scrollIntoView({block: "nearest", inline: "nearest"});
+  }
+  select(pathId(), false);
+});
 document.querySelectorAll(".seg button[data-f]").forEach(b => b.onclick = async () => {
   state.filter = b.dataset.f; document.querySelectorAll(".seg button[data-f]").forEach(x => x.setAttribute("aria-pressed", x === b));
   await loadList(true);
   if (isDesktop() && state.items.length && !state.items.some(i => i.id === state.selected)) select(state.items[0].id, true);
+});
+// [ and ] step through the experiment cards.
+document.addEventListener("keydown", (e) => {
+  if (!["[", "]"].includes(e.key) || ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+  const order = ["all", ...state.experiments.map(x => x.slug)], i = order.indexOf(state.show);
+  const next = order[Math.min(Math.max(i + (e.key === "]" ? 1 : -1), 0), order.length - 1)];
+  if (next !== state.show) { e.preventDefault(); showExperiment(next); }
 });
 document.addEventListener("keydown", (e) => {
   if (!isDesktop() || ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
@@ -224,7 +311,7 @@ function nodeHtml(n) {
 async function renderDetail(id) {
   let d;
   try { d = await api(`/api/history/${encodeURIComponent(id)}`); }
-  catch (e) { $("detail").innerHTML = `<div class="panel detail-empty">${String(e.message).startsWith("404") ? "This item doesn't exist (it may belong to another experiment)." : esc(e.message)}</div>`; return; }
+  catch (e) { $("detail").innerHTML = `<div class="panel detail-empty">${String(e.message).startsWith("404") ? "This item doesn't exist." : esc(e.message)}</div>`; return; }
   if (state.selected !== id) return; // user moved on while loading
   const it = d.item, [cls, icon] = tone(it), L = d.levels;
   const decisionNode = d.timeline.find(n => n.key === "decision");
@@ -234,8 +321,9 @@ async function renderDetail(id) {
   const fact = (label, value) => `<div><div class="label">${label}</div><div class="value">${value}</div></div>`;
   $("detail").innerHTML = `
     <div class="dh">
-      <div>${isDesktop() ? "" : `<a href="/history" id="back">← All history</a>`}
-        <h2>${esc(it.direction || "")} ${esc(T.pair(it.instrument))}</h2><div class="sub">${esc(dt(it.time))}${it.regime ? ` · ${esc(pretty(it.regime))}` : ""}${it.news_risk ? ` · news ${esc(it.news_risk)}` : ""}</div></div>
+      <div>${isDesktop() ? "" : `<a href="/history${qs()}" id="back">← All history</a>`}
+        <h2>${esc(it.direction || "")} ${esc(T.pair(it.instrument))}</h2><div class="sub">${esc(dt(it.time))}${it.regime ? ` · ${esc(pretty(it.regime))}` : ""}${it.news_risk ? ` · news ${esc(it.news_risk)}` : ""}</div>
+        ${xtag(it.experiment, expOf(it.experiment) ? ` · ${esc(pretty(expOf(it.experiment).strategy))}` : "")}</div>
       <div class="res"><span class="badge ${cls}">${icon} ${esc(it.label)}</span>${hypoLine(it.hypothetical)}</div>
     </div>
     <div class="panel facts">
@@ -311,7 +399,7 @@ function drawChart(d) {
   const id = pathId();
   if (id) select(id, false);
   else if (isDesktop() && state.items.length) {
-    history.replaceState({}, "", `/history/${state.items[0].id}`);
+    history.replaceState({}, "", `/history/${state.items[0].id}${qs()}`);
     select(state.items[0].id, false);
   } else select(null, false);
 })();
