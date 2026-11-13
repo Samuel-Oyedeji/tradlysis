@@ -496,6 +496,23 @@ place orders.
    - Entries 08:00–12:00 on weekdays: the latest 15m candle closes beyond the range by 0.1× ATR(15m),
      and it is the first close beyond it since 08:00.
    - Stop in the middle of the range (at least the minimum stop); target 2R.
+
+   **Structure, liquidity & POI** (`app/strategy/structure_poi.py`) is a smart-money-concepts style
+   method: price takes the stops below a low, breaks the structure that was against it, and the trade
+   is the first return to the zone the move started from. Read on the 1h chart (or 4h), timed on 15m.
+   - Sweep: a swing low dips below the swing low before it (the *protected low*).
+   - Main break of structure: a candle then closes above the last swing high before that low; the
+     protected low must still hold (15m included).
+   - The swing (protected low to the highest high since) is at least 2× ATR.
+   - Structural liquidity: the deepest swing low inside the up-move, in the lower 60% of the swing.
+   - POI: the bearish candle at the origin of the move closest below that liquidity (within 1.5× ATR),
+     in the discount half of the swing. `SMC_POI_MODE` can loosen this: `DISCOUNT` takes the bearish
+     candle that only needs to reach the discount half below the liquidity, `ORIGIN` the last bearish
+     candle at the base of the move (the order block).
+   - Entry: the first 15m candle that trades into the POI and closes back above its low; with the 1h
+     structure the 4h trend must not be against it.
+   - Stop 0.1× ATR beyond the protected low; target the swing high (or a fixed R), capped at 4R.
+   Shorts are the mirror image.
    All of these are experiment settings on the Config page.
 5. **Market snapshot** is built and stored in `decision_requests` (unique per candle, so a
    restart never processes a candle twice).

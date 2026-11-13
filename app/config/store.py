@@ -78,6 +78,7 @@ _TP = ("trend_pullback",)
 _RB = ("range_breakout",)
 _TF = ("trend_following",)
 _LB = ("london_breakout",)
+_SP = ("structure_poi",)
 
 
 def _g(key: str, group: str, label: str, help: str = "", **kw: Any) -> FieldInfo:
@@ -204,7 +205,35 @@ FIELDS: tuple[FieldInfo, ...] = (
        "0.5 = the middle of the range; 1.0 = its other side.", kind="number", strategies=_LB),
     _e("session_target_r", "Strategy", "Target (R)", "Take-profit in multiples of the risk.", kind="number",
        strategies=_LB),
-    _e("strategy_max_target_r", "Strategy", "Max target (R)", kind="number", strategies=_TP + _RB),
+    _e("smc_structure_tf", "Strategy", "Structure timeframe",
+       "Where the sweep, break of structure, liquidity and POI are read. Entries are timed on 15m candles.",
+       kind="choice", choices=("H1", "H4"), strategies=_SP),
+    _e("smc_swing_bars", "Strategy", "Swing size (candles each side)",
+       "A swing high/low must be the extreme of this many candles on either side (1-6).", kind="number",
+       strategies=_SP),
+    _e("smc_lookback_bars", "Strategy", "Lookback (candles)",
+       "How far back a swing structure may start, in structure-timeframe candles (30-250).", kind="number",
+       strategies=_SP),
+    _e("smc_min_swing_atr", "Strategy", "Min swing size (ATR)",
+       "The swing from the protected low to the swing high, in ATR of the structure timeframe.", kind="number",
+       strategies=_SP),
+    _e("smc_liquidity_max_frac", "Strategy", "Liquidity at most (fraction of swing)",
+       "0.5 = the structural liquidity must be at or below the 50% level; 0.6 allows a little above.",
+       kind="number", strategies=_SP),
+    _e("smc_poi_max_gap_atr", "Strategy", "POI within (ATR of the liquidity)",
+       "How far below the structural liquidity the POI may be (above it for sells). LIQUIDITY mode only.",
+       kind="number", strategies=_SP),
+    _e("smc_poi_mode", "Strategy", "POI choice",
+       "LIQUIDITY: the down candle just below the structural liquidity, in the discount half. DISCOUNT: the "
+       "down candle closest to the liquidity that still reaches the discount half. ORIGIN: the last down candle "
+       "at the base of the move (order block). Mirrored for sells.",
+       kind="choice", choices=("LIQUIDITY", "DISCOUNT", "ORIGIN"), strategies=_SP),
+    _e("smc_stop_buffer_atr", "Strategy", "Stop beyond the protected low (ATR)", kind="number", strategies=_SP),
+    _e("smc_target_r", "Strategy", "Target (R)", "0 = the swing high (low for sells); otherwise a fixed multiple "
+       "of the risk.", kind="number", strategies=_SP),
+    _e("smc_htf_filter", "Strategy", "Skip trades against the 4h trend", "Applies with the H1 structure timeframe.",
+       kind="bool", strategies=_SP),
+    _e("strategy_max_target_r", "Strategy", "Max target (R)", kind="number", strategies=_TP + _RB + _SP),
     _e("openrouter_model", "Decision model", "Model", "Jev (typesafe/jev-1.13) or a chat model id."),
     _e("llm_call_policy", "Decision model", "When to call the model",
        "candidates_only: only when the rules find a setup. always: every 15 minutes.",

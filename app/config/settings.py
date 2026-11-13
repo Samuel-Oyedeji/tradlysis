@@ -158,6 +158,17 @@ class Settings(BaseSettings):
     session_buffer_atr: float = 0.1  # 15m close beyond the range, in 15m ATR
     session_stop_range_frac: float = 0.5  # stop this fraction of the range height back inside it (0.5 = middle)
     session_target_r: float = 2.0  # target, in multiples of the risk
+    # Structure, liquidity & POI (app/strategy/structure_poi.py): sweep -> break of structure -> back to the POI
+    smc_structure_tf: str = "H1"  # timeframe the swing structure is read on: H1 or H4
+    smc_swing_bars: int = 3  # a swing high/low must be the extreme of this many candles either side
+    smc_lookback_bars: int = 120  # how far back (structure-timeframe candles) a swing structure may start
+    smc_min_swing_atr: float = 2.0  # the swing (protected low to swing high) must be at least this many ATR
+    smc_liquidity_max_frac: float = 0.6  # structural liquidity must sit in the lower 60% of the swing (0.5 = the 50%)
+    smc_poi_max_gap_atr: float = 1.5  # the POI must be within this many ATR below the structural liquidity
+    smc_poi_mode: str = "LIQUIDITY"  # how the POI candle is chosen: LIQUIDITY, DISCOUNT or ORIGIN
+    smc_stop_buffer_atr: float = 0.1  # stop this many ATR beyond the protected low
+    smc_target_r: float = 0.0  # 0: target the swing high; > 0: a fixed multiple of the risk
+    smc_htf_filter: bool = True  # with H1 structure: skip trades against the 4h trend
 
     # --- News ------------------------------------------------------------------------
     news_calendar_url: str = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -249,6 +260,16 @@ class Settings(BaseSettings):
             raise ValueError("Require 0 < SESSION_MIN_RANGE_ATR < SESSION_MAX_RANGE_ATR")
         if self.session_buffer_atr < 0 or not 0 < self.session_stop_range_frac <= 1.0 or self.session_target_r <= 0:
             raise ValueError("Require SESSION_BUFFER_ATR >= 0, 0 < SESSION_STOP_RANGE_FRAC <= 1, SESSION_TARGET_R > 0")
+        if self.smc_structure_tf not in ("H1", "H4"):
+            raise ValueError("SMC_STRUCTURE_TF must be H1 or H4")
+        if self.smc_poi_mode not in ("LIQUIDITY", "DISCOUNT", "ORIGIN"):
+            raise ValueError("SMC_POI_MODE must be LIQUIDITY, DISCOUNT or ORIGIN")
+        if not 1 <= self.smc_swing_bars <= 6 or not 30 <= self.smc_lookback_bars <= 250:
+            raise ValueError("Require 1 <= SMC_SWING_BARS <= 6 and 30 <= SMC_LOOKBACK_BARS <= 250")
+        if self.smc_min_swing_atr <= 0 or not 0 < self.smc_liquidity_max_frac <= 1.0:
+            raise ValueError("Require SMC_MIN_SWING_ATR > 0 and 0 < SMC_LIQUIDITY_MAX_FRAC <= 1")
+        if self.smc_poi_max_gap_atr <= 0 or self.smc_stop_buffer_atr < 0 or self.smc_target_r < 0:
+            raise ValueError("Require SMC_POI_MAX_GAP_ATR > 0, SMC_STOP_BUFFER_ATR >= 0 and SMC_TARGET_R >= 0")
         if self.trading_mode == TradingMode.LIVE and self.live_trading_confirm != LIVE_CONFIRM_PHRASE:
             raise ValueError(
                 "TRADING_MODE=live requires LIVE_TRADING_CONFIRM="
